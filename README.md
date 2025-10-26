@@ -2,6 +2,7 @@
 Course project for IoT
 
 ### Dir struct
+```
 yolov7-tiny-trafficlight/
   └─ yolov7/
        ├─ run.py 
@@ -20,6 +21,7 @@ yolov7-tiny-trafficlight/
        │    │    └─ labels/
        │    └─ data.yaml
        └─ (other project files)
+```
 
 ### How to train
 - Run run.py and modify the default params
