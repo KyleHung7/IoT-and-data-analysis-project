@@ -50,7 +50,27 @@ TARGET_HEIGHT = 60
 
 # Traffic light ROI coordinates (x1, y1, x2, y2)
 # Default values - user should provide their coordinates
-TRAFFIC_LIGHT_ROI = None  # Will be set via command line argument
+TRAFFIC_LIGHT_ROI = np.array([[183, 100], [224, 100], [223, 120], [182, 120]])  # Will be set via command line argument
+
+# Traffic light color palettes (hex format)
+TRAFFIC_LIGHT_COLORS = {
+    "green": ["51a296", "dffbfd", "26636c", "879c95", "8ec9c5", "2a6c5e", "468f7d", "6ea4a3", "72a98e"],
+    "yellow": ["bf985a","f7e0d4","e4d0a0","927353","a8854a","fdf2e2","fdfcf1"],
+    "red": ["aa622e", "f4e4c5", "aa8f53", "7f6735", "f7c39d", "b8875b", "d58759"],
+}
+
+# Convert hex colors to RGB arrays for each category
+def hex_to_rgb(hex_color):
+    """Convert hex color string to RGB tuple."""
+    hex_color = hex_color.lstrip('#')
+    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+# Pre-compute RGB color palettes
+TRAFFIC_LIGHT_RGB = {
+    "green": np.array([hex_to_rgb(f"#{c}") for c in TRAFFIC_LIGHT_COLORS["green"]]),
+    "yellow": np.array([hex_to_rgb(f"#{c}") for c in TRAFFIC_LIGHT_COLORS["yellow"]]),
+    "red": np.array([hex_to_rgb(f"#{c}") for c in TRAFFIC_LIGHT_COLORS["red"]]),
+}
 
 TARGET = np.array(
     [
@@ -77,14 +97,34 @@ class ViewTransformer:
         return transformed_points.reshape(-1, 2)
 
 
-def detect_traffic_light(frame, roi_coords):
+def find_closest_color(pixel_rgb, color_palette, threshold=50):
     """
-    Detect traffic light color using HSV color space.
-    Focuses on yellow light detection as requested.
+    Find if a pixel RGB value is close to any color in the palette.
+    Uses Euclidean distance in RGB space.
+    
+    Args:
+        pixel_rgb: RGB tuple or array (R, G, B)
+        color_palette: Array of RGB colors to match against
+        threshold: Maximum distance to consider a match
+    
+    Returns:
+        bool: True if pixel matches any color in palette
+    """
+    pixel_rgb = np.array(pixel_rgb)
+    distances = np.sqrt(np.sum((color_palette - pixel_rgb) ** 2, axis=1))
+    return np.min(distances) <= threshold
+
+
+def detect_traffic_light(frame, roi_coords, color_threshold=50):
+    """
+    Detect traffic light color by counting pixels that match specific color palettes.
+    Uses spatial information: divides ROI into left (red), middle (yellow), right (green) regions.
+    This helps distinguish yellow from red since they're in different positions.
     
     Args:
         frame: Input frame (BGR format)
-        roi_coords: Tuple of (x1, y1, x2, y2) coordinates for traffic light ROI
+        roi_coords: Polygon coordinates as numpy array [[x1,y1], [x2,y2], ...] or tuple (x1, y1, x2, y2)
+        color_threshold: Maximum RGB distance to consider a color match (default: 50)
     
     Returns:
         tuple: (red_on, yellow_on, green_on, status_text)
@@ -92,67 +132,193 @@ def detect_traffic_light(frame, roi_coords):
     if roi_coords is None:
         return False, False, False, "N/A"
     
-    x1, y1, x2, y2 = roi_coords
-    # Ensure coordinates are within frame bounds
     h, w = frame.shape[:2]
-    x1, y1 = max(0, int(x1)), max(0, int(y1))
-    x2, y2 = min(w, int(x2)), min(h, int(y2))
     
-    if x2 <= x1 or y2 <= y1:
-        return False, False, False, "INVALID_ROI"
-    
-    roi = frame[y1:y2, x1:x2]
-    if roi.size == 0:
-        return False, False, False, "EMPTY_ROI"
-    
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    
-    # HSV ranges for traffic light colors
-    # Red (wraps around 0, so need two ranges)
-    red_lower1 = np.array([0, 80, 80])
-    red_upper1 = np.array([10, 255, 255])
-    red_lower2 = np.array([170, 80, 80])
-    red_upper2 = np.array([180, 255, 255])
-    
-    # Yellow (focus color)
-    yellow_lower = np.array([20, 80, 80])
-    yellow_upper = np.array([35, 255, 255])
-    
-    # Green
-    green_lower = np.array([40, 80, 80])
-    green_upper = np.array([80, 255, 255])
-    
-    # Create masks
-    mask_red = cv2.inRange(hsv, red_lower1, red_upper1) + cv2.inRange(hsv, red_lower2, red_upper2)
-    mask_yellow = cv2.inRange(hsv, yellow_lower, yellow_upper)
-    mask_green = cv2.inRange(hsv, green_lower, green_upper)
-    
-    # Count pixels (threshold: at least 2 pixels to consider light on)
-    red_pixels = np.count_nonzero(mask_red)
-    yellow_pixels = np.count_nonzero(mask_yellow)
-    green_pixels = np.count_nonzero(mask_green)
-    
-    # Priority: Red > Yellow > Green
-    red_on = red_pixels > 2
-    yellow_on = False
-    green_on = False
-    
-    if not red_on:
-        yellow_on = yellow_pixels > 2
-        if not yellow_on:
-            green_on = green_pixels > 2
-    
-    # Determine status text
-    if red_on:
-        status_text = "RED"
-    elif yellow_on:
-        status_text = "YELLOW"  # Focus on yellow as requested
-    elif green_on:
-        status_text = "GREEN"
+    # Handle polygon ROI (numpy array) or rectangle ROI (tuple)
+    if isinstance(roi_coords, np.ndarray) and len(roi_coords.shape) == 2:
+        # Polygon ROI
+        polygon = roi_coords.astype(np.int32)
+        
+        # Create a mask for the polygon
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(mask, [polygon], 255)
+        
+        # Get bounding box for the polygon to extract the region
+        x, y, w_roi, h_roi = cv2.boundingRect(polygon)
+        if w_roi <= 0 or h_roi <= 0:
+            return False, False, False, "INVALID_ROI"
+        
+        # Extract the region
+        roi_region = frame[y:y+h_roi, x:x+w_roi]
+        mask_region = mask[y:y+h_roi, x:x+w_roi]
+        
+        # Only process pixels within the polygon
+        if roi_region.size == 0:
+            return False, False, False, "EMPTY_ROI"
+        
+        # Convert BGR to RGB for color matching
+        roi_rgb = cv2.cvtColor(roi_region, cv2.COLOR_BGR2RGB)
+        
+        # Get ROI dimensions for spatial division
+        roi_h, roi_w = roi_rgb.shape[:2]
+        
     else:
+        # Rectangle ROI (backward compatibility)
+        if isinstance(roi_coords, tuple) and len(roi_coords) == 4:
+            x1, y1, x2, y2 = roi_coords
+        else:
+            return False, False, False, "INVALID_ROI_FORMAT"
+        
+        # Ensure coordinates are within frame bounds
+        x1, y1 = max(0, int(x1)), max(0, int(y1))
+        x2, y2 = min(w, int(x2)), min(h, int(y2))
+        
+        if x2 <= x1 or y2 <= y1:
+            return False, False, False, "INVALID_ROI"
+        
+        roi_region = frame[y1:y2, x1:x2]
+        if roi_region.size == 0:
+            return False, False, False, "EMPTY_ROI"
+        
+        # Convert BGR to RGB for color matching
+        roi_rgb = cv2.cvtColor(roi_region, cv2.COLOR_BGR2RGB)
+        mask_region = None  # No mask for rectangle ROI
+        roi_h, roi_w = roi_rgb.shape[:2]
+    
+    # Divide ROI into 3 horizontal regions: left (red), middle (yellow), right (green)
+    third_w = roi_w // 3
+    
+    # Left region (red light position)
+    left_region = roi_rgb[:, :third_w]
+    left_mask = mask_region[:, :third_w] if mask_region is not None else None
+    
+    # Middle region (yellow light position)
+    middle_region = roi_rgb[:, third_w:2*third_w]
+    middle_mask = mask_region[:, third_w:2*third_w] if mask_region is not None else None
+    
+    # Right region (green light position)
+    right_region = roi_rgb[:, 2*third_w:]
+    right_mask = mask_region[:, 2*third_w:] if mask_region is not None else None
+    
+    # Count matches in each region with spatial awareness
+    def count_matches_in_region(region, mask, color_palette, color_threshold):
+        """Count pixels matching a color palette in a specific region."""
+        if mask is not None:
+            valid_pixels = region[mask > 0]
+        else:
+            valid_pixels = region.reshape(-1, 3)
+        
+        if len(valid_pixels) == 0:
+            return 0
+        
+        count = 0
+        for pixel in valid_pixels:
+            if find_closest_color(pixel, color_palette, color_threshold):
+                count += 1
+        return count
+    
+    # Count matches in each region for each color
+    # Left region: primarily check for red
+    left_red = count_matches_in_region(left_region, left_mask, TRAFFIC_LIGHT_RGB["red"], color_threshold)
+    left_yellow = count_matches_in_region(left_region, left_mask, TRAFFIC_LIGHT_RGB["yellow"], color_threshold)
+    
+    # Middle region: primarily check for yellow (focus)
+    middle_red = count_matches_in_region(middle_region, middle_mask, TRAFFIC_LIGHT_RGB["red"], color_threshold)
+    middle_yellow = count_matches_in_region(middle_region, middle_mask, TRAFFIC_LIGHT_RGB["yellow"], color_threshold)
+    
+    # Right region: primarily check for green
+    right_green = count_matches_in_region(right_region, right_mask, TRAFFIC_LIGHT_RGB["green"], color_threshold)
+    right_yellow = count_matches_in_region(right_region, right_mask, TRAFFIC_LIGHT_RGB["yellow"], color_threshold)
+    
+    # Use spatial information: check each region for its expected color
+    # Also check for yellow in middle region (focus)
+    red_count = left_red  # Red should be in left region
+    yellow_count = middle_yellow  # Yellow should be in middle region (focus)
+    green_count = right_green  # Green should be in right region
+    
+    # Additional check: if yellow is detected in middle, prioritize it even if red/yellow counts are close
+    # This helps distinguish yellow from red
+    min_pixel_threshold = 5  # Minimum pixels to consider a light is on
+    
+    red_on = red_count >= min_pixel_threshold and red_count > (yellow_count * 0.7)  # Red must be significantly more than yellow
+    yellow_on = yellow_count >= min_pixel_threshold and (yellow_count > red_count * 0.8 or middle_yellow > left_red)  # Yellow in middle region
+    green_on = green_count >= min_pixel_threshold
+    
+    # Priority: If yellow is detected in middle region, prioritize it
+    if yellow_on and middle_yellow >= min_pixel_threshold:
+        # Yellow is in middle, so it's likely yellow
+        if middle_yellow > left_red and middle_yellow > right_green:
+            red_on = False
+            green_on = False
+            status_text = "YELLOW"
+        elif red_count > green_count and red_count > yellow_count * 1.2:
+            yellow_on = False
+            green_on = False
+            status_text = "RED"
+        elif green_count > red_count and green_count > yellow_count * 1.2:
+            yellow_on = False
+            red_on = False
+            status_text = "GREEN"
+        else:
+            status_text = "YELLOW"  # Default to yellow if detected in middle
+    elif red_on:
+        yellow_on = False
+        green_on = False
+        status_text = "RED"
+    elif green_on:
+        yellow_on = False
+        red_on = False
+        status_text = "GREEN"
+    elif yellow_on:
+        red_on = False
+        green_on = False
+        status_text = "YELLOW"
+    else:
+        red_on, yellow_on, green_on = False, False, False
         status_text = "OFF"
     
     return red_on, yellow_on, green_on, status_text
+
+
+def visualize_rois(frame, source_polygon, traffic_light_roi):
+    """
+    Visualize the ROI polygons on a frame for verification.
+    Useful for checking if coordinates are correct.
+    
+    Args:
+        frame: Input frame
+        source_polygon: SOURCE polygon for vehicle detection zone
+        traffic_light_roi: Traffic light ROI (polygon or rectangle)
+    
+    Returns:
+        Annotated frame with polygons drawn
+    """
+    annotated_frame = frame.copy()
+    
+    # Draw SOURCE polygon in red
+    annotated_frame = sv.draw_polygon(
+        scene=annotated_frame, 
+        polygon=source_polygon, 
+        color=sv.Color(255, 0, 0),  # Red
+        thickness=4
+    )
+    
+    # Draw traffic light ROI in green/yellow
+    if traffic_light_roi is not None:
+        if isinstance(traffic_light_roi, np.ndarray) and len(traffic_light_roi.shape) == 2:
+            # Polygon ROI
+            annotated_frame = sv.draw_polygon(
+                scene=annotated_frame,
+                polygon=traffic_light_roi,
+                color=sv.Color(0, 255, 0),  # Green
+                thickness=4
+            )
+        elif isinstance(traffic_light_roi, tuple) and len(traffic_light_roi) == 4:
+            # Rectangle ROI
+            x1, y1, x2, y2 = traffic_light_roi
+            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 4)
+    
+    return annotated_frame
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -201,8 +367,19 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--traffic_light_roi",
         default=None,
-        help="Traffic light ROI coordinates as 'x1,y1,x2,y2' (e.g., '668,53,680,64')",
+        help="Traffic light ROI coordinates as 'x1,y1,x2,y2' (rectangle) or 'x1,y1,x2,y2,x3,y3,x4,y4' (polygon)",
         type=str,
+    )
+    parser.add_argument(
+        "--visualize_first_frame",
+        action="store_true",
+        help="Visualize the first frame with ROI polygons drawn to verify coordinates",
+    )
+    parser.add_argument(
+        "--color_threshold",
+        default=50,
+        type=int,
+        help="Maximum RGB distance to consider a color match (default: 50)",
     )
 
     return parser.parse_args()
@@ -220,18 +397,30 @@ if __name__ == "__main__":
         )
     args.roboflow_api_key = api_key
 
-    # Parse traffic light ROI coordinates if provided
-    traffic_light_roi = None
+    # Parse traffic light ROI coordinates if provided, otherwise use default
+    traffic_light_roi = TRAFFIC_LIGHT_ROI  # Use default polygon
     if args.traffic_light_roi:
         try:
             coords = [int(x.strip()) for x in args.traffic_light_roi.split(',')]
             if len(coords) == 4:
+                # Rectangle format (x1, y1, x2, y2)
                 traffic_light_roi = tuple(coords)
-                print(f"Traffic light ROI set to: {traffic_light_roi}")
+                print(f"Traffic light ROI set to rectangle: {traffic_light_roi}")
+            elif len(coords) == 8:
+                # Polygon format (x1, y1, x2, y2, x3, y3, x4, y4)
+                traffic_light_roi = np.array([[coords[0], coords[1]], 
+                                             [coords[2], coords[3]], 
+                                             [coords[4], coords[5]], 
+                                             [coords[6], coords[7]]])
+                print(f"Traffic light ROI set to polygon: {traffic_light_roi}")
             else:
-                print(f"Warning: Invalid traffic light ROI format. Expected 'x1,y1,x2,y2', got: {args.traffic_light_roi}")
+                print(f"Warning: Invalid traffic light ROI format. Expected 'x1,y1,x2,y2' or 'x1,y1,x2,y2,x3,y3,x4,y4', got: {args.traffic_light_roi}")
+                print(f"Using default ROI: {TRAFFIC_LIGHT_ROI}")
         except ValueError as e:
             print(f"Warning: Could not parse traffic light ROI: {e}")
+            print(f"Using default ROI: {TRAFFIC_LIGHT_ROI}")
+    else:
+        print(f"Using default traffic light ROI (polygon): {TRAFFIC_LIGHT_ROI}")
 
     video_info = sv.VideoInfo.from_video_path(video_path=args.source_video_path)
     model = get_roboflow_model(model_id=args.model_id, api_key=args.roboflow_api_key)
@@ -274,10 +463,24 @@ if __name__ == "__main__":
 
     coordinates = defaultdict(lambda: deque(maxlen=video_info.fps))
 
+    # Optional: Visualize first frame to verify coordinates
+    if args.visualize_first_frame:
+        try:
+            first_frame = next(frame_generator)
+            first_frame_viz = visualize_rois(first_frame, SOURCE, traffic_light_roi)
+            sv.plot_image(first_frame_viz)
+            print("First frame visualization displayed. Close the window to continue processing.")
+            # Reset generator
+            frame_generator = sv.get_video_frames_generator(source_path=args.source_video_path)
+        except StopIteration:
+            print("Warning: Could not read first frame for visualization")
+
     with sv.VideoSink(args.target_video_path, video_info) as sink:
         for frame in frame_generator:
-            # Detect traffic light status
-            red_on, yellow_on, green_on, traffic_light_status = detect_traffic_light(frame, traffic_light_roi)
+            # Detect traffic light status using pixel counting with color palettes
+            red_on, yellow_on, green_on, traffic_light_status = detect_traffic_light(
+                frame, traffic_light_roi, color_threshold=args.color_threshold
+            )
             
             results = model.infer(frame)[0]
             detections = sv.Detections.from_inference(results)
@@ -351,20 +554,41 @@ if __name__ == "__main__":
 
             annotated_frame = frame.copy()
             
+            # Draw SOURCE polygon for verification
+            annotated_frame = sv.draw_polygon(
+                scene=annotated_frame, 
+                polygon=SOURCE, 
+                color=sv.Color(255, 0, 0),  # Red
+                thickness=4
+            )
+            
             # Draw traffic light ROI and status on frame
             if traffic_light_roi is not None:
-                x1, y1, x2, y2 = traffic_light_roi
                 # Determine color based on status
                 if red_on:
-                    roi_color = (0, 0, 255)  # Red in BGR
+                    roi_color = sv.Color(255, 0, 0)  # Red
                 elif yellow_on:
-                    roi_color = (0, 255, 255)  # Yellow in BGR (focus)
+                    roi_color = sv.Color(255, 255, 0)  # Yellow (focus)
                 elif green_on:
-                    roi_color = (0, 255, 0)  # Green in BGR
+                    roi_color = sv.Color(0, 255, 0)  # Green
                 else:
-                    roi_color = (128, 128, 128)  # Gray
+                    roi_color = sv.Color(128, 128, 128)  # Gray
                 
-                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), roi_color, 2)
+                # Draw polygon ROI if it's a numpy array, otherwise draw rectangle
+                if isinstance(traffic_light_roi, np.ndarray) and len(traffic_light_roi.shape) == 2:
+                    # Polygon ROI
+                    annotated_frame = sv.draw_polygon(
+                        scene=annotated_frame,
+                        polygon=traffic_light_roi,
+                        color=roi_color,
+                        thickness=4
+                    )
+                else:
+                    # Rectangle ROI (backward compatibility)
+                    if isinstance(traffic_light_roi, tuple) and len(traffic_light_roi) == 4:
+                        x1, y1, x2, y2 = traffic_light_roi
+                        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), roi_color.as_bgr(), 2)
+                
                 # Display traffic light status text
                 status_text_display = f"Traffic Light: {traffic_light_status}"
                 if yellow_on:
@@ -375,7 +599,7 @@ if __name__ == "__main__":
                     (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 
                     0.7, 
-                    roi_color, 
+                    roi_color.as_bgr(), 
                     2
                 )
             
