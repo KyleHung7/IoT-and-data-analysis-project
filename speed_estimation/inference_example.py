@@ -23,7 +23,7 @@ VEHICLE_COLORS_HEX = {
     "truck": "#00FF00",        # Green
     "bus": "#0000FF",          # Blue
     "motorcycle": "#FFFF00",   # Yellow
-    "unknown": "#808080",      # Gray (default)
+    # "unknown": "#808080",      # Gray (default)
 }
 
 # Create color palette from vehicle colors
@@ -37,7 +37,7 @@ VEHICLE_COLOR_INDICES = {
     "truck": 1,
     "bus": 2,
     "motorcycle": 3,
-    "unknown": 4,
+    # "unknown": 4,
 }
 
 SOURCE = np.array([[25, 210],
