@@ -48,10 +48,21 @@ SOURCE = np.array([[25, 210],
 TARGET_WIDTH = 10
 TARGET_HEIGHT = 60
 
+# Calibration factor: pixels to meters conversion
+# This should be calibrated based on your specific setup
+# Example: If TARGET_HEIGHT (60 pixels) represents 60 meters, then PIXELS_TO_METERS = 1.0
+# Adjust this value based on your actual setup
+PIXELS_TO_METERS = 1.0  # Default: 1 pixel = 1 meter (user should calibrate)
+
 # Traffic light ROI coordinates (x1, y1, x2, y2)
 # Default values - user should provide their coordinates
 TRAFFIC_LIGHT_ROI = np.array([[183, 100], [224, 100], [223, 120], [182, 120]])  # Will be set via command line argument
 
+# Stop line coordinates (horizontal line: [x1, y1], [x2, y2])
+STOP_LINE = np.array([
+    [25, 210],
+    [270, 220]
+])
 # Traffic light color palettes (hex format)
 TRAFFIC_LIGHT_COLORS = {
     "green": ["51a296", "dffbfd", "26636c", "879c95", "8ec9c5", "2a6c5e", "468f7d", "6ea4a3", "72a98e"],
@@ -497,19 +508,23 @@ if __name__ == "__main__":
             for tracker_id, [_, y] in zip(detections.tracker_id, points):
                 coordinates[tracker_id].append(y)
 
-            labels = []
-            # for tracker_id in detections.tracker_id:
-            #     if len(coordinates[tracker_id]) < video_info.fps / 2:
-            #         labels.append(f"#{tracker_id}")
-            #     else:
-            #         coordinate_start = coordinates[tracker_id][-1]
-            #         coordinate_end = coordinates[tracker_id][0]
-            #         distance = abs(coordinate_start - coordinate_end)
-            #         time = len(coordinates[tracker_id]) / video_info.fps
-            #         speed = distance / time * 3.6
-            #         labels.append(f"#{tracker_id} {int(speed)} km/h")
+            # Transform stop line to top-view coordinates using the same method as vehicle points
+            # Stop line is a horizontal line, transform both endpoints
+            stop_line_points = view_transformer.transform_points(STOP_LINE.astype(np.float32))
+            # Get the y-coordinate of the stop line in top-view (use average of both points)
+            stop_line_y_topview = float(np.mean(stop_line_points[:, 1])) if len(stop_line_points) > 0 else None
 
-            # NEW: compute speed, get vehicle type, and also log to CSV
+            # Calculate traffic density (number of vehicles in detection zone)
+            traffic_density = len(detections)
+
+            # Calculate distance to front vehicle for each vehicle
+            # Vehicles move from high y to low y in top-view, so front vehicle has lower y
+            vehicle_positions = {}  # tracker_id -> (x, y) in top-view
+            for det_idx, tracker_id in enumerate(detections.tracker_id):
+                vehicle_positions[tracker_id] = points[det_idx]
+
+            labels = []
+            # NEW: compute speed, get vehicle type, distance to stop line, distance to front vehicle, and log to CSV
             color_lookup_indices = []  # Store color indices for each detection
             for det_idx, tracker_id in enumerate(detections.tracker_id):
                 x_curr, y_curr = points[det_idx]
@@ -517,23 +532,65 @@ if __name__ == "__main__":
                 # Get vehicle type from class_id
                 class_id = detections.class_id[det_idx] if hasattr(detections, 'class_id') and detections.class_id is not None else None
                 vehicle_type = VEHICLE_CLASSES.get(int(class_id), "unknown") if class_id is not None else "unknown"
-                color_idx = VEHICLE_COLOR_INDICES.get(vehicle_type, VEHICLE_COLOR_INDICES["unknown"])
+                color_idx = VEHICLE_COLOR_INDICES.get(vehicle_type, 0)  # Default to first color if unknown
                 color_lookup_indices.append(color_idx)
+
+                # Calculate distance to stop line using same method as speed (y-coordinate difference in top-view)
+                distance_to_stop_line = None
+                if stop_line_y_topview is not None:
+                    # Distance is the difference in y-coordinates (same units as speed calculation)
+                    # Positive means vehicle is before stop line (higher y), negative means past it
+                    distance_to_stop_line = float(y_curr - stop_line_y_topview)
+
+                # Calculate distance to front vehicle
+                # Front vehicle is the one with lower y value (closer to stop line) in the same lane
+                distance_to_front_vehicle = None
+                current_y = y_curr
+                # Find vehicles in front (lower y values, within reasonable x range to be in same lane)
+                front_vehicles = []
+                for other_tracker_id, (other_x, other_y) in vehicle_positions.items():
+                    if other_tracker_id != tracker_id:
+                        # Check if vehicle is in front (lower y) and in similar lane (similar x)
+                        y_diff = current_y - other_y  # Positive if other is in front
+                        x_diff = abs(x_curr - other_x)
+                        # Consider vehicles in front if y_diff > 0 and x_diff is reasonable (same lane)
+                        if y_diff > 0 and x_diff < TARGET_WIDTH * 2:  # Within 2 lane widths
+                            front_vehicles.append((other_tracker_id, other_y, y_diff))
+                
+                if front_vehicles:
+                    # Find the closest front vehicle (smallest y difference)
+                    closest_front = min(front_vehicles, key=lambda v: v[2])
+                    distance_to_front_vehicle = float(closest_front[2])  # y-coordinate difference
 
                 if len(coordinates[tracker_id]) < video_info.fps / 2:
                     # Not enough history to estimate speed
                     labels.append(f"#{tracker_id} {vehicle_type}")
                     speed_kmh = None
+                    speed_ms = None
                     distance = None
                     time_s = None
+                    ttc = None
                 else:
-                    coordinate_start = coordinates[tracker_id][-1]
-                    coordinate_end = coordinates[tracker_id][0]
-                    distance = abs(coordinate_start - coordinate_end)
+                    # Calculate speed using same method: y-coordinate difference over time
+                    coordinate_start = coordinates[tracker_id][-1]  # Most recent (highest y)
+                    coordinate_end = coordinates[tracker_id][0]    # Oldest (lowest y)
+                    distance = abs(coordinate_start - coordinate_end)  # Distance in top-view pixels
                     time_s = len(coordinates[tracker_id]) / video_info.fps
-                    speed = distance / time_s * 3.6
-                    speed_kmh = float(speed)
-                    labels.append(f"#{tracker_id} {vehicle_type} {int(speed)} km/h")
+                    speed_pixels_per_sec = distance / time_s
+                    # Convert to km/h: pixels/sec * (meters/pixel) * (km/m) * (sec/hour)
+                    # Assuming 1 pixel = PIXELS_TO_METERS meters
+                    speed_ms = speed_pixels_per_sec * PIXELS_TO_METERS  # m/s
+                    speed_kmh = speed_ms * 3.6  # km/h
+                    labels.append(f"#{tracker_id} {vehicle_type} {int(speed_kmh)} km/h")
+                    
+                    # Calculate TTC (Time to Collision) = distance to stop line / speed
+                    # Only calculate if vehicle is before stop line and has positive speed
+                    if distance_to_stop_line is not None and distance_to_stop_line > 0 and speed_ms is not None and speed_ms > 0:
+                        # Convert distance to meters (same units as speed_ms)
+                        distance_to_stop_line_m = distance_to_stop_line * PIXELS_TO_METERS
+                        ttc = distance_to_stop_line_m / speed_ms  # seconds
+                    else:
+                        ttc = None
 
                 # log one row per detection on this frame
                 csv_rows.append(
@@ -547,8 +604,13 @@ if __name__ == "__main__":
                         "distance": distance if distance is not None else "",
                         "time_s": time_s if time_s is not None else "",
                         "speed_kmh": speed_kmh if speed_kmh is not None else "",
-                        "traffic_light_status": traffic_light_status,  # NEW: traffic light status
-                        "yellow_light": yellow_on,  # NEW: yellow light flag (focus)
+                        "speed_ms": speed_ms if speed_ms is not None else "",
+                        "traffic_light_status": traffic_light_status,
+                        "yellow_light": yellow_on,
+                        "distance_to_stop_line": distance_to_stop_line if distance_to_stop_line is not None else "",
+                        "distance_to_front_vehicle": distance_to_front_vehicle if distance_to_front_vehicle is not None else "",
+                        "traffic_density": traffic_density,
+                        "ttc": ttc if ttc is not None else "",
                     }
                 )
 
@@ -623,7 +685,12 @@ if __name__ == "__main__":
             frame_index += 1  # Increment frame index
         # cv2.destroyAllWindows()
     
-    fieldnames = ["frame_index", "tracker_id", "vehicle_type", "class_id", "x", "y", "distance", "time_s", "speed_kmh", "traffic_light_status", "yellow_light"]
+    fieldnames = [
+        "frame_index", "tracker_id", "vehicle_type", "class_id", "x", "y", 
+        "distance", "time_s", "speed_kmh", "speed_ms",
+        "traffic_light_status", "yellow_light",
+        "distance_to_stop_line", "distance_to_front_vehicle", "traffic_density", "ttc"
+    ]
     os.makedirs(os.path.dirname(args.csv_output_path), exist_ok=True) if os.path.dirname(args.csv_output_path) else None
 
     with open(args.csv_output_path, "w", newline="") as f:
