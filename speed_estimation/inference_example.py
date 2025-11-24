@@ -40,10 +40,12 @@ VEHICLE_COLOR_INDICES = {
     # "unknown": 4,
 }
 
-SOURCE = np.array([[25, 210],
-    [270, 220],
-    [859, 520],
-    [35, 520]])
+# SOURCE = np.array([[25, 210],
+#     [270, 220],
+#     [859, 520],
+#     [35, 520]])
+
+SOURCE = np.array([[420, 101], [536, 101], [800, 240], [435, 250]])
 
 TARGET_WIDTH = 10
 TARGET_HEIGHT = 60
@@ -56,13 +58,13 @@ PIXELS_TO_METERS = 1.0  # Default: 1 pixel = 1 meter (user should calibrate)
 
 # Traffic light ROI coordinates (x1, y1, x2, y2)
 # Default values - user should provide their coordinates
-TRAFFIC_LIGHT_ROI = np.array([[183, 100], [224, 100], [223, 120], [182, 120]])  # Will be set via command line argument
+# TRAFFIC_LIGHT_ROI = np.array([[183, 100], [224, 100], [223, 120], [182, 120]]) #old vid
+TRAFFIC_LIGHT_ROI = np.array([[490, 45], [536, 45], [536, 60], [489, 60]]) 
 
 # Stop line coordinates (horizontal line: [x1, y1], [x2, y2])
-STOP_LINE = np.array([
-    [25, 210],
-    [270, 220]
-])
+STOP_LINE = np.array(
+    [[420, 101], [536, 101]]
+)
 # Traffic light color palettes (hex format)
 TRAFFIC_LIGHT_COLORS = {
     "green": ["51a296", "dffbfd", "26636c", "879c95", "8ec9c5", "2a6c5e", "468f7d", "6ea4a3", "72a98e"],
@@ -473,6 +475,10 @@ if __name__ == "__main__":
     frame_index = 0  # or start at 1 if you prefer
 
     coordinates = defaultdict(lambda: deque(maxlen=video_info.fps))
+    
+    # Track vehicle stop line crossing state
+    # Key: tracker_id, Value: dict with 'crossed', 'decision', 'last_distance'
+    vehicle_crossing_state = {}
 
     # Optional: Visualize first frame to verify coordinates
     if args.visualize_first_frame:
@@ -531,8 +537,12 @@ if __name__ == "__main__":
 
                 # Get vehicle type from class_id
                 class_id = detections.class_id[det_idx] if hasattr(detections, 'class_id') and detections.class_id is not None else None
-                vehicle_type = VEHICLE_CLASSES.get(int(class_id), "unknown") if class_id is not None else "unknown"
-                color_idx = VEHICLE_COLOR_INDICES.get(vehicle_type, 0)  # Default to first color if unknown
+                # Map to vehicle type, default to "car" if class_id is not recognized
+                if class_id is not None:
+                    vehicle_type = VEHICLE_CLASSES.get(int(class_id), "car")  # Default to "car" if unknown
+                else:
+                    vehicle_type = "car"  # Default to "car" if no class_id
+                color_idx = VEHICLE_COLOR_INDICES.get(vehicle_type, 0)  # Default to first color (car) if not found
                 color_lookup_indices.append(color_idx)
 
                 # Calculate distance to stop line using same method as speed (y-coordinate difference in top-view)
@@ -541,6 +551,44 @@ if __name__ == "__main__":
                     # Distance is the difference in y-coordinates (same units as speed calculation)
                     # Positive means vehicle is before stop line (higher y), negative means past it
                     distance_to_stop_line = float(y_curr - stop_line_y_topview)
+                
+                # Track stop line crossing during yellow light
+                yellow_light_decision = ""  # "go" or "stop" or empty if not crossed yet
+                
+                # Initialize or update crossing state for this vehicle
+                if tracker_id not in vehicle_crossing_state:
+                    vehicle_crossing_state[tracker_id] = {
+                        'crossed': False,
+                        'decision': '',
+                        'last_distance': distance_to_stop_line if distance_to_stop_line is not None else float('inf')
+                    }
+                
+                # Check if vehicle has crossed the stop line
+                if not vehicle_crossing_state[tracker_id]['crossed']:
+                    last_distance = vehicle_crossing_state[tracker_id]['last_distance']
+                    
+                    # Vehicle crosses stop line when distance changes from positive to negative
+                    # or when it goes from before to after the stop line
+                    if (distance_to_stop_line is not None and 
+                        last_distance is not None and 
+                        last_distance > 0 and distance_to_stop_line <= 0):
+                        # Vehicle just crossed the stop line
+                        vehicle_crossing_state[tracker_id]['crossed'] = True
+                        
+                        # Determine decision based on yellow light status
+                        if yellow_on:
+                            vehicle_crossing_state[tracker_id]['decision'] = "go"
+                            yellow_light_decision = "go"
+                        else:
+                            vehicle_crossing_state[tracker_id]['decision'] = "stop"
+                            yellow_light_decision = "stop"
+                    else:
+                        # Update last distance for next frame
+                        if distance_to_stop_line is not None:
+                            vehicle_crossing_state[tracker_id]['last_distance'] = distance_to_stop_line
+                else:
+                    # Vehicle already crossed, use stored decision
+                    yellow_light_decision = vehicle_crossing_state[tracker_id]['decision']
 
                 # Calculate distance to front vehicle
                 # Front vehicle is the one with lower y value (closer to stop line) in the same lane
@@ -611,6 +659,7 @@ if __name__ == "__main__":
                         "distance_to_front_vehicle": distance_to_front_vehicle if distance_to_front_vehicle is not None else "",
                         "traffic_density": traffic_density,
                         "ttc": ttc if ttc is not None else "",
+                        "yellow_light_decision": yellow_light_decision,  # "go" or "stop" when crossing during yellow
                     }
                 )
 
@@ -689,7 +738,8 @@ if __name__ == "__main__":
         "frame_index", "tracker_id", "vehicle_type", "class_id", "x", "y", 
         "distance", "time_s", "speed_kmh", "speed_ms",
         "traffic_light_status", "yellow_light",
-        "distance_to_stop_line", "distance_to_front_vehicle", "traffic_density", "ttc"
+        "distance_to_stop_line", "distance_to_front_vehicle", "traffic_density", "ttc",
+        "yellow_light_decision"
     ]
     os.makedirs(os.path.dirname(args.csv_output_path), exist_ok=True) if os.path.dirname(args.csv_output_path) else None
 
