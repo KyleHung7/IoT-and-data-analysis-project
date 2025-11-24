@@ -1,6 +1,7 @@
 import argparse
 import os
 from collections import defaultdict, deque
+from pathlib import Path
 
 import cv2
 import csv   # NEW
@@ -358,13 +359,13 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--target_video_path",
-        required=True,
-        help="Path to the target video file (output)",
+        default=None,
+        help="Path to the target video file (output). If not provided, will auto-generate from source video name.",
         type=str,
     )
     parser.add_argument(
         "--confidence_threshold",
-        default=0.3,
+        default=0.4,
         help="Confidence threshold for the model",
         type=float,
     )
@@ -373,8 +374,8 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--csv_output_path",                     # NEW
-        default="speed_log.csv",               # NEW
-        help="Path to the CSV file with speed data",  # NEW
+        default=None,               # NEW
+        help="Path to the CSV file with speed data. If not provided, will auto-generate from source video name.",  # NEW
         type=str,                                # NEW
     )
     parser.add_argument(
@@ -409,6 +410,45 @@ if __name__ == "__main__":
             "ROBOFLOW_API_KEY environment variable."
         )
     args.roboflow_api_key = api_key
+
+    # Auto-generate output paths if not provided
+    source_path = Path(args.source_video_path)
+    source_stem = source_path.stem  # filename without extension
+    source_dir = source_path.parent
+    
+    # Generate target video path if not provided
+    if args.target_video_path is None:
+        # Try to find a unique filename
+        counter = 0
+        while True:
+            if counter == 0:
+                target_filename = f"{source_stem}_result.mp4"
+            else:
+                target_filename = f"{source_stem}_result_{counter}.mp4"
+            
+            target_path = source_dir / target_filename
+            if not target_path.exists():
+                args.target_video_path = str(target_path)
+                break
+            counter += 1
+        print(f"Auto-generated target video path: {args.target_video_path}")
+    
+    # Generate CSV output path if not provided
+    if args.csv_output_path is None:
+        # Try to find a unique filename
+        counter = 0
+        while True:
+            if counter == 0:
+                csv_filename = f"{source_stem}_speed_log.csv"
+            else:
+                csv_filename = f"{source_stem}_speed_log_{counter}.csv"
+            
+            csv_path = source_dir / csv_filename
+            if not csv_path.exists():
+                args.csv_output_path = str(csv_path)
+                break
+            counter += 1
+        print(f"Auto-generated CSV output path: {args.csv_output_path}")
 
     # Parse traffic light ROI coordinates if provided, otherwise use default
     traffic_light_roi = TRAFFIC_LIGHT_ROI  # Use default polygon
