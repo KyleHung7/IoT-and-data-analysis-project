@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 import csv   # NEW
 import numpy as np
-from inference.models.utils import get_roboflow_model
+from ultralytics import YOLO
 
 import supervision as sv
 
@@ -40,11 +40,6 @@ VEHICLE_COLOR_INDICES = {
     "motorcycle": 3,
     # "unknown": 4,
 }
-
-# Minimum bbox dimensions/area to consider a detection a car.
-# Smaller boxes will be reclassified as motorcycle to avoid mislabeling riders.
-MIN_CAR_BBOX_AREA = 5000  # pixels^2
-MIN_CAR_BBOX_HEIGHT = 60  # pixels
 
 # SOURCE = np.array([[25, 210],
 #     [270, 220],
@@ -301,6 +296,72 @@ def detect_traffic_light(frame, roi_coords, color_threshold=50):
     return red_on, yellow_on, green_on, status_text
 
 
+def suppress_small_cars_over_motorcycles(
+    detections: "sv.Detections",
+    min_car_width: int = 20,
+    iou_threshold: float = 0.3,
+):
+    """
+    Suppress tiny car detections that sit on top of motorcycle detections.
+    We:
+    - keep all motorcycle boxes
+    - drop car boxes with width < min_car_width that have IoU >= iou_threshold with any motorcycle box.
+    """
+    if (
+        detections is None
+        or len(detections) == 0
+        or not hasattr(detections, "xyxy")
+        or not hasattr(detections, "class_id")
+        or detections.class_id is None
+    ):
+        return detections
+
+    class_ids = np.array(detections.class_id)
+    car_mask = class_ids == 2         # COCO car
+    moto_mask = class_ids == 3        # COCO motorcycle
+
+    if not np.any(car_mask) or not np.any(moto_mask):
+        return detections
+
+    keep_mask = np.ones(len(detections), dtype=bool)
+    car_indices = np.where(car_mask)[0]
+    moto_boxes = detections.xyxy[moto_mask]
+
+    for car_idx in car_indices:
+        car_box = detections.xyxy[car_idx]
+        car_width = car_box[2] - car_box[0]
+
+        # Only consider very narrow car boxes as potential riders
+        if car_width >= min_car_width:
+            continue
+
+        # Check overlap with all motorcycles
+        for moto_box in moto_boxes:
+            x1 = max(car_box[0], moto_box[0])
+            y1 = max(car_box[1], moto_box[1])
+            x2 = min(car_box[2], moto_box[2])
+            y2 = min(car_box[3], moto_box[3])
+
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            inter_area = (x2 - x1) * (y2 - y1)
+            car_area = (car_box[2] - car_box[0]) * (car_box[3] - car_box[1])
+            moto_area = (moto_box[2] - moto_box[0]) * (moto_box[3] - moto_box[1])
+            union_area = car_area + moto_area - inter_area
+
+            if union_area <= 0:
+                continue
+
+            iou = inter_area / union_area
+            if iou >= iou_threshold:
+                # Suppress this tiny car-on-motorcycle box
+                keep_mask[car_idx] = False
+                break
+
+    return detections[keep_mask]
+
+
 def draw_labels_with_overlap_prevention(frame, detections, labels, color_lookup_indices, text_scale=0.5, text_thickness=1):
     """
     Draw labels with transparent background and overlap prevention.
@@ -452,19 +513,19 @@ def visualize_rois(frame, source_polygon, traffic_light_roi):
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Vehicle Speed Estimation using Inference and Supervision"
+        description="Vehicle Speed Estimation using YOLO 11 and Supervision"
     )
     parser.add_argument(
-        "--model_id",
-        default="yolov8x-640",
-        help="Roboflow model ID",
+        "--model_path",
+        default="yolo11x.pt",
+        help="Path to YOLO model file (default: yolo11x.pt)",
         type=str,
     )
     parser.add_argument(
-        "--roboflow_api_key",
-        default=None,
-        help="Roboflow API KEY",
-        type=str,
+        "--imgsz",
+        default=1280,
+        type=int,
+        help="Input image size for YOLO model (default: 1280). Higher values improve accuracy but slow inference. Common values: 640, 1280",
     )
     parser.add_argument(
         "--source_video_path",
@@ -516,15 +577,6 @@ def parse_arguments() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_arguments()
-
-    api_key = args.roboflow_api_key
-    api_key = os.environ.get("ROBOFLOW_API_KEY", api_key)
-    if api_key is None:
-        raise ValueError(
-            "Roboflow API key is missing. Please provide it as an argument or set the "
-            "ROBOFLOW_API_KEY environment variable."
-        )
-    args.roboflow_api_key = api_key
 
     # Auto-generate output paths if not provided
     source_path = Path(args.source_video_path)
@@ -591,7 +643,7 @@ if __name__ == "__main__":
         print(f"Using default traffic light ROI (polygon): {TRAFFIC_LIGHT_ROI}")
 
     video_info = sv.VideoInfo.from_video_path(video_path=args.source_video_path)
-    model = get_roboflow_model(model_id=args.model_id, api_key=args.roboflow_api_key)
+    model = YOLO(args.model_path)
 
     byte_track = sv.ByteTrack(
         frame_rate=video_info.fps, track_activation_threshold=args.confidence_threshold
@@ -662,11 +714,14 @@ if __name__ == "__main__":
             yellow_started = yellow_on and not previous_yellow_on
             yellow_ended = previous_yellow_on and not yellow_on
             
-            results = model.infer(frame)[0]
-            detections = sv.Detections.from_inference(results)
+            results = model(frame, imgsz=args.imgsz)[0]
+            detections = sv.Detections.from_ultralytics(results)
             detections = detections[detections.confidence > args.confidence_threshold]
             detections = detections[polygon_zone.trigger(detections)]
             detections = detections.with_nms(threshold=args.iou_threshold)
+            # Suppress very small car boxes that sit on top of motorcycles
+            detections = suppress_small_cars_over_motorcycles(detections, min_car_width=20, iou_threshold=0.3)
+
             detections = byte_track.update_with_detections(detections=detections)
 
             points = detections.get_anchors_coordinates(
@@ -703,10 +758,6 @@ if __name__ == "__main__":
             color_lookup_indices = []  # Store color indices for each detection
             for det_idx, tracker_id in enumerate(detections.tracker_id):
                 x_curr, y_curr = points[det_idx]
-                bbox = detections.xyxy[det_idx] if hasattr(detections, "xyxy") else None
-                bbox_width = bbox[2] - bbox[0] if bbox is not None else None
-                bbox_height = bbox[3] - bbox[1] if bbox is not None else None
-                bbox_area = (bbox_width * bbox_height) if (bbox_width is not None and bbox_height is not None) else None
 
                 # Get vehicle type from class_id
                 class_id = detections.class_id[det_idx] if hasattr(detections, 'class_id') and detections.class_id is not None else None
@@ -715,11 +766,6 @@ if __name__ == "__main__":
                     vehicle_type = VEHICLE_CLASSES.get(int(class_id), "car")  # Default to "car" if unknown
                 else:
                     vehicle_type = "car"  # Default to "car" if no class_id
-                
-                if vehicle_type == "car" and bbox_area is not None and bbox_height is not None:
-                    if bbox_area < MIN_CAR_BBOX_AREA or bbox_height < MIN_CAR_BBOX_HEIGHT:
-                        vehicle_type = "motorcycle"
-                
                 color_idx = VEHICLE_COLOR_INDICES.get(vehicle_type, 0)  # Default to first color (car) if not found
                 color_lookup_indices.append(color_idx)
 
