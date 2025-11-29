@@ -41,6 +41,11 @@ VEHICLE_COLOR_INDICES = {
     # "unknown": 4,
 }
 
+# Minimum bbox dimensions/area to consider a detection a car.
+# Smaller boxes will be reclassified as motorcycle to avoid mislabeling riders.
+MIN_CAR_BBOX_AREA = 5000  # pixels^2
+MIN_CAR_BBOX_HEIGHT = 60  # pixels
+
 # SOURCE = np.array([[25, 210],
 #     [270, 220],
 #     [859, 520],
@@ -60,7 +65,7 @@ PIXELS_TO_METERS = 1.0  # Default: 1 pixel = 1 meter (user should calibrate)
 # Traffic light ROI coordinates (x1, y1, x2, y2)
 # Default values - user should provide their coordinates
 # TRAFFIC_LIGHT_ROI = np.array([[183, 100], [224, 100], [223, 120], [182, 120]]) #old vid
-TRAFFIC_LIGHT_ROI = np.array([[490, 45], [536, 45], [536, 60], [489, 60]]) 
+TRAFFIC_LIGHT_ROI = np.array([[500, 50], [520, 50], [520, 55], [500, 55]]) 
 
 # Stop line coordinates (horizontal line: [x1, y1], [x2, y2])
 STOP_LINE = np.array(
@@ -199,20 +204,20 @@ def detect_traffic_light(frame, roi_coords, color_threshold=50):
         mask_region = None  # No mask for rectangle ROI
         roi_h, roi_w = roi_rgb.shape[:2]
     
-    # Divide ROI into 3 horizontal regions: left (red), middle (yellow), right (green)
-    third_w = roi_w // 3
-    
-    # Left region (red light position)
-    left_region = roi_rgb[:, :third_w]
-    left_mask = mask_region[:, :third_w] if mask_region is not None else None
-    
-    # Middle region (yellow light position)
-    middle_region = roi_rgb[:, third_w:2*third_w]
-    middle_mask = mask_region[:, third_w:2*third_w] if mask_region is not None else None
-    
-    # Right region (green light position)
-    right_region = roi_rgb[:, 2*third_w:]
-    right_mask = mask_region[:, 2*third_w:] if mask_region is not None else None
+    # Divide ROI into four horizontal slices: red, yellow, buffer, green.
+    # Slices are computed from relative widths so it also works if ROI width is not divisible by 4.
+    def slice_region(start_ratio, end_ratio):
+        start = int(round(roi_w * start_ratio))
+        end = int(round(roi_w * end_ratio))
+        end = max(end, start + 1)  # ensure at least 1 pixel width
+        region = roi_rgb[:, start:end]
+        mask = mask_region[:, start:end] if mask_region is not None else None
+        return region, mask
+
+    red_region, red_mask = slice_region(0.0, 0.25)
+    yellow_region, yellow_mask = slice_region(0.25, 0.5)
+    buffer_region, buffer_mask = slice_region(0.5, 0.75)
+    green_region, green_mask = slice_region(0.75, 1.0)
     
     # Count matches in each region with spatial awareness
     def count_matches_in_region(region, mask, color_palette, color_threshold):
@@ -233,35 +238,37 @@ def detect_traffic_light(frame, roi_coords, color_threshold=50):
     
     # Count matches in each region for each color
     # Left region: primarily check for red
-    left_red = count_matches_in_region(left_region, left_mask, TRAFFIC_LIGHT_RGB["red"], color_threshold)
-    left_yellow = count_matches_in_region(left_region, left_mask, TRAFFIC_LIGHT_RGB["yellow"], color_threshold)
+    left_red = count_matches_in_region(red_region, red_mask, TRAFFIC_LIGHT_RGB["red"], color_threshold)
+    left_yellow = count_matches_in_region(red_region, red_mask, TRAFFIC_LIGHT_RGB["yellow"], color_threshold)
     
-    # Middle region: primarily check for yellow (focus)
-    middle_red = count_matches_in_region(middle_region, middle_mask, TRAFFIC_LIGHT_RGB["red"], color_threshold)
-    middle_yellow = count_matches_in_region(middle_region, middle_mask, TRAFFIC_LIGHT_RGB["yellow"], color_threshold)
+    yellow_red = count_matches_in_region(yellow_region, yellow_mask, TRAFFIC_LIGHT_RGB["red"], color_threshold)
+    yellow_yellow = count_matches_in_region(yellow_region, yellow_mask, TRAFFIC_LIGHT_RGB["yellow"], color_threshold)
     
-    # Right region: primarily check for green
-    right_green = count_matches_in_region(right_region, right_mask, TRAFFIC_LIGHT_RGB["green"], color_threshold)
-    right_yellow = count_matches_in_region(right_region, right_mask, TRAFFIC_LIGHT_RGB["yellow"], color_threshold)
+    buffer_yellow = count_matches_in_region(buffer_region, buffer_mask, TRAFFIC_LIGHT_RGB["yellow"], color_threshold)
+    
+    right_green = count_matches_in_region(green_region, green_mask, TRAFFIC_LIGHT_RGB["green"], color_threshold)
+    right_yellow = count_matches_in_region(green_region, green_mask, TRAFFIC_LIGHT_RGB["yellow"], color_threshold)
     
     # Use spatial information: check each region for its expected color
     # Also check for yellow in middle region (focus)
-    red_count = left_red  # Red should be in left region
-    yellow_count = middle_yellow  # Yellow should be in middle region (focus)
-    green_count = right_green  # Green should be in right region
+    red_count = left_red  # Red should be in left-most region
+    yellow_count = yellow_yellow  # Yellow should be in second-left region
+    green_count = right_green  # Green should be in right-most region
     
     # Additional check: if yellow is detected in middle, prioritize it even if red/yellow counts are close
     # This helps distinguish yellow from red
     min_pixel_threshold = 5  # Minimum pixels to consider a light is on
     
     red_on = red_count >= min_pixel_threshold and red_count > (yellow_count * 0.7)  # Red must be significantly more than yellow
-    yellow_on = yellow_count >= min_pixel_threshold and (yellow_count > red_count * 0.8 or middle_yellow > left_red)  # Yellow in middle region
+    yellow_on = yellow_count >= min_pixel_threshold and (
+        yellow_count > red_count * 0.8 or yellow_yellow > left_red
+    )  # Yellow in middle region
     green_on = green_count >= min_pixel_threshold
     
     # Priority: If yellow is detected in middle region, prioritize it
-    if yellow_on and middle_yellow >= min_pixel_threshold:
+    if yellow_on and yellow_yellow >= min_pixel_threshold:
         # Yellow is in middle, so it's likely yellow
-        if middle_yellow > left_red and middle_yellow > right_green:
+        if yellow_yellow > left_red and yellow_yellow > right_green and yellow_yellow > buffer_yellow:
             red_on = False
             green_on = False
             status_text = "YELLOW"
@@ -294,6 +301,114 @@ def detect_traffic_light(frame, roi_coords, color_threshold=50):
     return red_on, yellow_on, green_on, status_text
 
 
+def draw_labels_with_overlap_prevention(frame, detections, labels, color_lookup_indices, text_scale=0.5, text_thickness=1):
+    """
+    Draw labels with transparent background and overlap prevention.
+    Uses outline text for visibility without blocking the view.
+    """
+    if len(detections) == 0 or len(labels) == 0 or not hasattr(detections, "xyxy"):
+        return frame
+    
+    annotated_frame = frame.copy()
+    h, w = frame.shape[:2]
+    
+    # Get bounding boxes and calculate label positions
+    label_positions = []  # List of (x, y, label, color) tuples
+    used_rectangles = []  # List of (x1, y1, x2, y2) for occupied areas
+    
+    sample_count = min(len(detections), len(labels))
+    
+    for idx in range(sample_count):
+        label = labels[idx]
+        # Get bounding box
+        bbox = detections.xyxy[idx]
+        if bbox is None or len(bbox) < 4:
+            continue
+        x1, y1, x2, y2 = bbox.astype(int)
+        
+        # Get color
+        if color_lookup_indices and idx < len(color_lookup_indices):
+            color_idx = color_lookup_indices[idx]
+            color = VEHICLE_COLOR_PALETTE.by_idx(color_idx)
+        else:
+            color = sv.Color(255, 255, 255)  # Default white
+        
+        # Calculate text size
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = text_scale
+        thickness = text_thickness
+        
+        (text_width, text_height), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+        
+        # Position label at top center of bounding box
+        label_x = int((x1 + x2) / 2 - text_width / 2)
+        label_y = y1 - 5  # 5 pixels above the box
+        
+        # If label would go off screen, move it below the box
+        if label_y < text_height + 5:
+            label_y = y2 + text_height + 5
+        
+        # Check for overlap with existing labels
+        label_rect = (label_x - 2, label_y - text_height - 2, 
+                     label_x + text_width + 2, label_y + baseline + 2)
+        
+        # Try to find a non-overlapping position
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            overlap = False
+            for used_rect in used_rectangles:
+                # Check if rectangles overlap
+                if not (label_rect[2] < used_rect[0] or label_rect[0] > used_rect[2] or
+                       label_rect[3] < used_rect[1] or label_rect[1] > used_rect[3]):
+                    overlap = True
+                    break
+            
+            if not overlap:
+                break
+            
+            # Try alternative positions
+            if attempt == 0:
+                # Try right side
+                label_x = x2 + 5
+                label_y = int((y1 + y2) / 2)
+            elif attempt == 1:
+                # Try left side
+                label_x = x1 - text_width - 5
+                label_y = int((y1 + y2) / 2)
+            elif attempt == 2:
+                # Try bottom
+                label_x = int((x1 + x2) / 2 - text_width / 2)
+                label_y = y2 + text_height + 10
+            else:
+                # Skip this label if we can't find a good position
+                break
+            
+            label_rect = (label_x - 2, label_y - text_height - 2, 
+                         label_x + text_width + 2, label_y + baseline + 2)
+        
+        if not overlap:
+            label_positions.append((label_x, label_y, label, color))
+            used_rectangles.append(label_rect)
+    
+    # Draw labels with outline for visibility (no solid background)
+    for label_x, label_y, label, color in label_positions:
+        # Draw text outline (black) for better visibility
+        outline_color = (0, 0, 0)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                if dx != 0 or dy != 0:
+                    cv2.putText(annotated_frame, label, 
+                              (label_x + dx, label_y + dy), 
+                              font, font_scale, outline_color, thickness + 1, cv2.LINE_AA)
+        
+        # Draw main text in color
+        cv2.putText(annotated_frame, label, 
+                   (label_x, label_y), 
+                   font, font_scale, color.as_bgr(), thickness, cv2.LINE_AA)
+    
+    return annotated_frame
+
+
 def visualize_rois(frame, source_polygon, traffic_light_roi):
     """
     Visualize the ROI polygons on a frame for verification.
@@ -314,7 +429,7 @@ def visualize_rois(frame, source_polygon, traffic_light_roi):
         scene=annotated_frame, 
         polygon=source_polygon, 
         color=sv.Color(255, 0, 0),  # Red
-        thickness=4
+        thickness=1
     )
     
     # Draw traffic light ROI in green/yellow
@@ -325,7 +440,7 @@ def visualize_rois(frame, source_polygon, traffic_light_roi):
                 scene=annotated_frame,
                 polygon=traffic_light_roi,
                 color=sv.Color(0, 255, 0),  # Green
-                thickness=4
+                thickness=1
             )
         elif isinstance(traffic_light_roi, tuple) and len(traffic_light_roi) == 4:
             # Rectangle ROI
@@ -486,17 +601,21 @@ if __name__ == "__main__":
         resolution_wh=video_info.resolution_wh
     )
     text_scale = sv.calculate_optimal_text_scale(resolution_wh=video_info.resolution_wh)
+    # Reduce text scale slightly to make labels less obtrusive
+    text_scale = max(0.4, text_scale * 0.7)
+    
     # Use custom color palette for vehicle types
     box_annotator = sv.BoxAnnotator(
         color=VEHICLE_COLOR_PALETTE,
         thickness=thickness,
         color_lookup=sv.ColorLookup.INDEX
     )
+    # Configure label annotator with transparent background and better positioning
     label_annotator = sv.LabelAnnotator(
         color=VEHICLE_COLOR_PALETTE,
         text_scale=text_scale,
-        text_thickness=thickness,
-        text_position=sv.Position.BOTTOM_CENTER,
+        text_thickness=max(1, int(thickness * 0.8)),  # Slightly thinner text
+        text_position=sv.Position.TOP_CENTER,  # Position at top to avoid overlap with boxes
         color_lookup=sv.ColorLookup.INDEX
     )
     trace_annotator = sv.TraceAnnotator(
@@ -519,6 +638,7 @@ if __name__ == "__main__":
     # Track vehicle stop line crossing state
     # Key: tracker_id, Value: dict with 'crossed', 'decision', 'last_distance'
     vehicle_crossing_state = {}
+    previous_yellow_on = False
 
     # Optional: Visualize first frame to verify coordinates
     if args.visualize_first_frame:
@@ -538,6 +658,9 @@ if __name__ == "__main__":
             red_on, yellow_on, green_on, traffic_light_status = detect_traffic_light(
                 frame, traffic_light_roi, color_threshold=args.color_threshold
             )
+            
+            yellow_started = yellow_on and not previous_yellow_on
+            yellow_ended = previous_yellow_on and not yellow_on
             
             results = model.infer(frame)[0]
             detections = sv.Detections.from_inference(results)
@@ -566,6 +689,12 @@ if __name__ == "__main__":
             # Calculate distance to front vehicle for each vehicle
             # Vehicles move from high y to low y in top-view, so front vehicle has lower y
             vehicle_positions = {}  # tracker_id -> (x, y) in top-view
+            if yellow_ended:
+                for tracker_id, state in vehicle_crossing_state.items():
+                    if state.get('yellow_pending') and not state.get('crossed'):
+                        state['decision'] = state.get('decision') or 'stop'
+                        state['yellow_pending'] = False
+
             for det_idx, tracker_id in enumerate(detections.tracker_id):
                 vehicle_positions[tracker_id] = points[det_idx]
 
@@ -574,6 +703,10 @@ if __name__ == "__main__":
             color_lookup_indices = []  # Store color indices for each detection
             for det_idx, tracker_id in enumerate(detections.tracker_id):
                 x_curr, y_curr = points[det_idx]
+                bbox = detections.xyxy[det_idx] if hasattr(detections, "xyxy") else None
+                bbox_width = bbox[2] - bbox[0] if bbox is not None else None
+                bbox_height = bbox[3] - bbox[1] if bbox is not None else None
+                bbox_area = (bbox_width * bbox_height) if (bbox_width is not None and bbox_height is not None) else None
 
                 # Get vehicle type from class_id
                 class_id = detections.class_id[det_idx] if hasattr(detections, 'class_id') and detections.class_id is not None else None
@@ -582,6 +715,11 @@ if __name__ == "__main__":
                     vehicle_type = VEHICLE_CLASSES.get(int(class_id), "car")  # Default to "car" if unknown
                 else:
                     vehicle_type = "car"  # Default to "car" if no class_id
+                
+                if vehicle_type == "car" and bbox_area is not None and bbox_height is not None:
+                    if bbox_area < MIN_CAR_BBOX_AREA or bbox_height < MIN_CAR_BBOX_HEIGHT:
+                        vehicle_type = "motorcycle"
+                
                 color_idx = VEHICLE_COLOR_INDICES.get(vehicle_type, 0)  # Default to first color (car) if not found
                 color_lookup_indices.append(color_idx)
 
@@ -596,39 +734,38 @@ if __name__ == "__main__":
                 yellow_light_decision = ""  # "go" or "stop" or empty if not crossed yet
                 
                 # Initialize or update crossing state for this vehicle
-                if tracker_id not in vehicle_crossing_state:
-                    vehicle_crossing_state[tracker_id] = {
+                state = vehicle_crossing_state.setdefault(
+                    tracker_id,
+                    {
                         'crossed': False,
                         'decision': '',
-                        'last_distance': distance_to_stop_line if distance_to_stop_line is not None else float('inf')
-                    }
-                
-                # Check if vehicle has crossed the stop line
-                if not vehicle_crossing_state[tracker_id]['crossed']:
-                    last_distance = vehicle_crossing_state[tracker_id]['last_distance']
-                    
-                    # Vehicle crosses stop line when distance changes from positive to negative
-                    # or when it goes from before to after the stop line
-                    if (distance_to_stop_line is not None and 
-                        last_distance is not None and 
-                        last_distance > 0 and distance_to_stop_line <= 0):
-                        # Vehicle just crossed the stop line
-                        vehicle_crossing_state[tracker_id]['crossed'] = True
-                        
-                        # Determine decision based on yellow light status
-                        if yellow_on:
-                            vehicle_crossing_state[tracker_id]['decision'] = "go"
-                            yellow_light_decision = "go"
-                        else:
-                            vehicle_crossing_state[tracker_id]['decision'] = "stop"
-                            yellow_light_decision = "stop"
+                        'last_distance': distance_to_stop_line if distance_to_stop_line is not None else float('inf'),
+                        'yellow_pending': False,
+                    },
+                )
+
+                before_stop_line = distance_to_stop_line is not None and distance_to_stop_line > 0
+
+                if yellow_on and before_stop_line:
+                    state['yellow_pending'] = True
+
+                if not state['crossed']:
+                    last_distance = state['last_distance']
+
+                    if (
+                        distance_to_stop_line is not None
+                        and last_distance is not None
+                        and last_distance > 0
+                        and distance_to_stop_line <= 0
+                    ):
+                        state['crossed'] = True
+                        if yellow_on or state.get('yellow_pending'):
+                            state['decision'] = 'go'
+                        state['yellow_pending'] = False
                     else:
-                        # Update last distance for next frame
                         if distance_to_stop_line is not None:
-                            vehicle_crossing_state[tracker_id]['last_distance'] = distance_to_stop_line
-                else:
-                    # Vehicle already crossed, use stored decision
-                    yellow_light_decision = vehicle_crossing_state[tracker_id]['decision']
+                            state['last_distance'] = distance_to_stop_line
+                yellow_light_decision = state.get('decision', '')
 
                 # Calculate distance to front vehicle
                 # Front vehicle is the one with lower y value (closer to stop line) in the same lane
@@ -710,7 +847,7 @@ if __name__ == "__main__":
                 scene=annotated_frame, 
                 polygon=SOURCE, 
                 color=sv.Color(255, 0, 0),  # Red
-                thickness=4
+                thickness=1
             )
             
             # Draw traffic light ROI and status on frame
@@ -732,7 +869,7 @@ if __name__ == "__main__":
                         scene=annotated_frame,
                         polygon=traffic_light_roi,
                         color=roi_color,
-                        thickness=4
+                        thickness=1
                     )
                 else:
                     # Rectangle ROI (backward compatibility)
@@ -762,9 +899,10 @@ if __name__ == "__main__":
             annotated_frame = box_annotator.annotate(
                 scene=annotated_frame, detections=detections, custom_color_lookup=custom_color_lookup
             )
-            # Use custom colors for labels based on vehicle type
-            annotated_frame = label_annotator.annotate(
-                scene=annotated_frame, detections=detections, labels=labels, custom_color_lookup=custom_color_lookup
+            # Use custom label drawing with overlap prevention and transparent background
+            annotated_frame = draw_labels_with_overlap_prevention(
+                annotated_frame, detections, labels, color_lookup_indices, 
+                text_scale=text_scale, text_thickness=max(1, int(thickness * 0.8))
             )
 
             sink.write_frame(annotated_frame)
@@ -772,6 +910,7 @@ if __name__ == "__main__":
             # if cv2.waitKey(1) & 0xFF == ord("q"):
             #     break
             frame_index += 1  # Increment frame index
+            previous_yellow_on = yellow_on
         # cv2.destroyAllWindows()
     
     fieldnames = [
