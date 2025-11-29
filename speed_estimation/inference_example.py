@@ -41,6 +41,10 @@ VEHICLE_COLOR_INDICES = {
     # "unknown": 4,
 }
 
+# Minimum pixel width for car detections to be considered valid.
+# Cars narrower than this are likely noise or riders and will be ignored.
+MIN_CAR_WIDTH_PX = 20
+
 # SOURCE = np.array([[25, 210],
 #     [270, 220],
 #     [859, 520],
@@ -294,72 +298,6 @@ def detect_traffic_light(frame, roi_coords, color_threshold=50):
         status_text = "OFF"
     
     return red_on, yellow_on, green_on, status_text
-
-
-def suppress_small_cars_over_motorcycles(
-    detections: "sv.Detections",
-    min_car_width: int = 20,
-    iou_threshold: float = 0.3,
-):
-    """
-    Suppress tiny car detections that sit on top of motorcycle detections.
-    We:
-    - keep all motorcycle boxes
-    - drop car boxes with width < min_car_width that have IoU >= iou_threshold with any motorcycle box.
-    """
-    if (
-        detections is None
-        or len(detections) == 0
-        or not hasattr(detections, "xyxy")
-        or not hasattr(detections, "class_id")
-        or detections.class_id is None
-    ):
-        return detections
-
-    class_ids = np.array(detections.class_id)
-    car_mask = class_ids == 2         # COCO car
-    moto_mask = class_ids == 3        # COCO motorcycle
-
-    if not np.any(car_mask) or not np.any(moto_mask):
-        return detections
-
-    keep_mask = np.ones(len(detections), dtype=bool)
-    car_indices = np.where(car_mask)[0]
-    moto_boxes = detections.xyxy[moto_mask]
-
-    for car_idx in car_indices:
-        car_box = detections.xyxy[car_idx]
-        car_width = car_box[2] - car_box[0]
-
-        # Only consider very narrow car boxes as potential riders
-        if car_width >= min_car_width:
-            continue
-
-        # Check overlap with all motorcycles
-        for moto_box in moto_boxes:
-            x1 = max(car_box[0], moto_box[0])
-            y1 = max(car_box[1], moto_box[1])
-            x2 = min(car_box[2], moto_box[2])
-            y2 = min(car_box[3], moto_box[3])
-
-            if x2 <= x1 or y2 <= y1:
-                continue
-
-            inter_area = (x2 - x1) * (y2 - y1)
-            car_area = (car_box[2] - car_box[0]) * (car_box[3] - car_box[1])
-            moto_area = (moto_box[2] - moto_box[0]) * (moto_box[3] - moto_box[1])
-            union_area = car_area + moto_area - inter_area
-
-            if union_area <= 0:
-                continue
-
-            iou = inter_area / union_area
-            if iou >= iou_threshold:
-                # Suppress this tiny car-on-motorcycle box
-                keep_mask[car_idx] = False
-                break
-
-    return detections[keep_mask]
 
 
 def draw_labels_with_overlap_prevention(frame, detections, labels, color_lookup_indices, text_scale=0.5, text_thickness=1):
@@ -719,8 +657,36 @@ if __name__ == "__main__":
             detections = detections[detections.confidence > args.confidence_threshold]
             detections = detections[polygon_zone.trigger(detections)]
             detections = detections.with_nms(threshold=args.iou_threshold)
-            # Suppress very small car boxes that sit on top of motorcycles
-            detections = suppress_small_cars_over_motorcycles(detections, min_car_width=20, iou_threshold=0.3)
+            
+            # Filter out non-vehicle detections and small cars
+            if (
+                len(detections) > 0
+                and hasattr(detections, "xyxy")
+                and hasattr(detections, "class_id")
+                and detections.class_id is not None
+            ):
+                keep_mask = np.ones(len(detections), dtype=bool)
+                for idx in range(len(detections)):
+                    cls_id = int(detections.class_id[idx])
+                    
+                    # Filter out persons (class_id 0) - we only track vehicles
+                    if cls_id == 0:  # COCO person
+                        keep_mask[idx] = False
+                        continue
+                    
+                    # Filter out car detections with very small width; motorcycles are kept
+                    if cls_id == 2:  # COCO car
+                        x1, y1, x2, y2 = detections.xyxy[idx]
+                        bbox_width = x2 - x1
+                        if bbox_width < MIN_CAR_WIDTH_PX:
+                            keep_mask[idx] = False
+                            continue
+                    
+                    # Only keep vehicle classes we care about (car, motorcycle, bus, truck)
+                    if cls_id not in VEHICLE_CLASSES:
+                        keep_mask[idx] = False
+                
+                detections = detections[keep_mask]
 
             detections = byte_track.update_with_detections(detections=detections)
 
