@@ -719,6 +719,16 @@ if __name__ == "__main__":
             for det_idx, tracker_id in enumerate(detections.tracker_id):
                 vehicle_positions[tracker_id] = points[det_idx]
 
+            # Determine actual traffic light status based on color logic (red takes priority)
+            if red_on:
+                actual_traffic_light_status = "RED"
+            elif yellow_on:
+                actual_traffic_light_status = "YELLOW"
+            elif green_on:
+                actual_traffic_light_status = "GREEN"
+            else:
+                actual_traffic_light_status = "OFF"
+            
             labels = []
             # NEW: compute speed, get vehicle type, distance to stop line, distance to front vehicle, and log to CSV
             color_lookup_indices = []  # Store color indices for each detection
@@ -758,7 +768,10 @@ if __name__ == "__main__":
 
                 before_stop_line = distance_to_stop_line is not None and distance_to_stop_line > 0
 
-                if yellow_on and before_stop_line:
+                # Only set yellow_pending when color is actually yellow (same logic as display)
+                # If red_on is true, it's red (not yellow), even if yellow_on is also true
+                is_actually_yellow = not red_on and yellow_on
+                if is_actually_yellow and before_stop_line:
                     state['yellow_pending'] = True
 
                 if not state['crossed']:
@@ -771,7 +784,8 @@ if __name__ == "__main__":
                         and distance_to_stop_line <= 0
                     ):
                         state['crossed'] = True
-                        if yellow_on or state.get('yellow_pending'):
+                        # Only record 'go' decision if crossing during actual yellow (not red)
+                        if is_actually_yellow or state.get('yellow_pending'):
                             state['decision'] = 'go'
                         state['yellow_pending'] = False
                     else:
@@ -842,8 +856,10 @@ if __name__ == "__main__":
                         "time_s": time_s if time_s is not None else "",
                         "speed_kmh": speed_kmh if speed_kmh is not None else "",
                         "speed_ms": speed_ms if speed_ms is not None else "",
-                        "traffic_light_status": traffic_light_status,
-                        "yellow_light": yellow_on,
+                        "traffic_light_status": actual_traffic_light_status,  # Use status that matches color logic
+                        # Only record yellow_light as True when color is actually yellow (same logic as display)
+                        # If red_on is true, it's red (not yellow), even if yellow_on is also true
+                        "yellow_light": (actual_traffic_light_status == "YELLOW"),  # Yellow only when status is actually YELLOW
                         "distance_to_stop_line": distance_to_stop_line if distance_to_stop_line is not None else "",
                         "distance_to_front_vehicle": distance_to_front_vehicle if distance_to_front_vehicle is not None else "",
                         "traffic_density": traffic_density,
@@ -889,10 +905,21 @@ if __name__ == "__main__":
                         x1, y1, x2, y2 = traffic_light_roi
                         cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), roi_color.as_bgr(), 2)
                 
-                # Display traffic light status text
-                status_text_display = f"Traffic Light: {traffic_light_status}"
-                if yellow_on:
-                    status_text_display += " [YELLOW FOCUS]"
+                # Display traffic light status text - use same logic as color determination
+                # Override status text to match the color logic (red takes priority)
+                if red_on:
+                    # Red color - status must be RED
+                    status_text_display = "Traffic Light: RED"
+                elif yellow_on:
+                    # Yellow color - show yellow focus
+                    status_text_display = "Traffic Light: YELLOW [YELLOW FOCUS]"
+                elif green_on:
+                    # Green color - status must be GREEN
+                    status_text_display = "Traffic Light: GREEN"
+                else:
+                    # Gray/off - status is OFF
+                    status_text_display = "Traffic Light: OFF"
+                
                 cv2.putText(
                     annotated_frame, 
                     status_text_display, 
