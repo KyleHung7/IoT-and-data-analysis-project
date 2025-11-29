@@ -625,8 +625,12 @@ if __name__ == "__main__":
 
     coordinates = defaultdict(lambda: deque(maxlen=video_info.fps))
     
+    # Track vehicle speed history for acceleration detection
+    # Key: tracker_id, Value: deque of (speed_ms, frame_index) tuples
+    vehicle_speed_history = defaultdict(lambda: deque(maxlen=video_info.fps))
+    
     # Track vehicle stop line crossing state
-    # Key: tracker_id, Value: dict with 'crossed', 'decision', 'last_distance'
+    # Key: tracker_id, Value: dict with 'crossed', 'decision', 'last_distance', 'yellow_pending', 'accelerated_during_yellow'
     vehicle_crossing_state = {}
     previous_yellow_on = False
 
@@ -649,8 +653,10 @@ if __name__ == "__main__":
                 frame, traffic_light_roi, color_threshold=args.color_threshold
             )
             
-            yellow_started = yellow_on and not previous_yellow_on
-            yellow_ended = previous_yellow_on and not yellow_on
+            # Determine actual yellow status (same logic as display - red takes priority)
+            is_actually_yellow = not red_on and yellow_on
+            yellow_started = is_actually_yellow and not previous_yellow_on
+            yellow_ended = previous_yellow_on and not is_actually_yellow
             
             results = model(frame, imgsz=args.imgsz)[0]
             detections = sv.Detections.from_ultralytics(results)
@@ -752,8 +758,8 @@ if __name__ == "__main__":
                     # Positive means vehicle is before stop line (higher y), negative means past it
                     distance_to_stop_line = float(y_curr - stop_line_y_topview)
                 
-                # Track stop line crossing during yellow light
-                yellow_light_decision = ""  # "go" or "stop" or empty if not crossed yet
+                # Track yellow light decision based on acceleration and stop line crossing
+                yellow_light_decision = ""  # "go" or "stop" or empty if not determined yet
                 
                 # Initialize or update crossing state for this vehicle
                 state = vehicle_crossing_state.setdefault(
@@ -763,20 +769,32 @@ if __name__ == "__main__":
                         'decision': '',
                         'last_distance': distance_to_stop_line if distance_to_stop_line is not None else float('inf'),
                         'yellow_pending': False,
+                        'accelerated_during_yellow': False,
+                        'speed_before_yellow': None,
                     },
                 )
 
                 before_stop_line = distance_to_stop_line is not None and distance_to_stop_line > 0
-
-                # Only set yellow_pending when color is actually yellow (same logic as display)
-                # If red_on is true, it's red (not yellow), even if yellow_on is also true
                 is_actually_yellow = not red_on and yellow_on
-                if is_actually_yellow and before_stop_line:
-                    state['yellow_pending'] = True
 
+                # Track if vehicle was pending during yellow (before stop line when yellow started)
+                if is_actually_yellow and before_stop_line and not state['crossed']:
+                    if not state['yellow_pending']:
+                        # Yellow just started for this vehicle - record initial speed
+                        state['yellow_pending'] = True
+                        if speed_ms is not None:
+                            state['speed_before_yellow'] = speed_ms
+                    else:
+                        # Vehicle is still in yellow period - check for acceleration
+                        if speed_ms is not None and state['speed_before_yellow'] is not None:
+                            speed_increase = speed_ms - state['speed_before_yellow']
+                            # Consider acceleration if speed increased by at least 0.5 m/s (1.8 km/h)
+                            if speed_increase >= 0.5:
+                                state['accelerated_during_yellow'] = True
+
+                # Check if vehicle crossed stop line
                 if not state['crossed']:
                     last_distance = state['last_distance']
-
                     if (
                         distance_to_stop_line is not None
                         and last_distance is not None
@@ -784,13 +802,23 @@ if __name__ == "__main__":
                         and distance_to_stop_line <= 0
                     ):
                         state['crossed'] = True
-                        # Only record 'go' decision if crossing during actual yellow (not red)
-                        if is_actually_yellow or state.get('yellow_pending'):
+                        # Make decision: go if accelerated during yellow AND crossed stop line
+                        if state.get('yellow_pending') and state.get('accelerated_during_yellow'):
                             state['decision'] = 'go'
+                        else:
+                            state['decision'] = 'stop'
                         state['yellow_pending'] = False
                     else:
                         if distance_to_stop_line is not None:
                             state['last_distance'] = distance_to_stop_line
+                
+                # If yellow ended and vehicle hasn't crossed yet, finalize decision
+                if yellow_ended and state.get('yellow_pending') and not state['crossed']:
+                    # Vehicle was in yellow but didn't cross - mark as stop
+                    if state['decision'] == '':
+                        state['decision'] = 'stop'
+                    state['yellow_pending'] = False
+                
                 yellow_light_decision = state.get('decision', '')
 
                 # Calculate distance to front vehicle
@@ -949,7 +977,7 @@ if __name__ == "__main__":
             # if cv2.waitKey(1) & 0xFF == ord("q"):
             #     break
             frame_index += 1  # Increment frame index
-            previous_yellow_on = yellow_on
+            previous_yellow_on = is_actually_yellow
         # cv2.destroyAllWindows()
     
     fieldnames = [
