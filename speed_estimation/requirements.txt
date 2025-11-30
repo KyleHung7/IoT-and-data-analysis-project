@@ -3,4 +3,4 @@ tqdm
 requests
 ultralytics
 super-gradients==3.5.0
-inference
+inference==0.9.4
