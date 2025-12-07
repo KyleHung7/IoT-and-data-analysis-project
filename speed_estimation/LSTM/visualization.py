@@ -191,19 +191,88 @@ def plot_correlation_matrix(
         plt.show()
 
 
+def denormalize_features(
+    normalized_features: np.ndarray,
+    normalizer_params: Dict,
+    feature_indices: List[int] = None
+) -> np.ndarray:
+    """
+    Denormalize features back to original scale.
+    
+    Args:
+        normalized_features: Normalized feature array of shape (n_samples, n_features) or (n_samples, 1)
+        normalizer_params: Normalization parameters from training
+        feature_indices: Optional list of feature indices to denormalize (if None, denormalize all)
+        
+    Returns:
+        Denormalized features
+    """
+    from .config import NORMALIZATION_METHOD
+    
+    if not normalizer_params:
+        return normalized_features
+    
+    denormalized = normalized_features.copy()
+    
+    if NORMALIZATION_METHOD == "standard":
+        mean = normalizer_params.get('mean')
+        std = normalizer_params.get('std')
+        if mean is not None and std is not None:
+            mean = np.array(mean)
+            std = np.array(std)
+            if feature_indices is not None and len(feature_indices) == 1:
+                # Single feature: extract the specific feature's mean/std
+                idx = feature_indices[0]
+                mean = mean[idx] if mean.ndim > 0 else mean
+                std = std[idx] if std.ndim > 0 else std
+            elif feature_indices is not None:
+                # Multiple features: extract subset
+                mean = mean[feature_indices]
+                std = std[feature_indices]
+            # Ensure shapes match for broadcasting
+            if denormalized.ndim == 2 and mean.ndim == 0:
+                denormalized = (denormalized * std) + mean
+            else:
+                denormalized = (denormalized * std) + mean
+    elif NORMALIZATION_METHOD == "minmax":
+        min_val = normalizer_params.get('min')
+        max_val = normalizer_params.get('max')
+        range_val = normalizer_params.get('range')
+        if min_val is not None and range_val is not None:
+            min_val = np.array(min_val)
+            range_val = np.array(range_val)
+            if feature_indices is not None and len(feature_indices) == 1:
+                # Single feature: extract the specific feature's min/range
+                idx = feature_indices[0]
+                min_val = min_val[idx] if min_val.ndim > 0 else min_val
+                range_val = range_val[idx] if range_val.ndim > 0 else range_val
+            elif feature_indices is not None:
+                min_val = min_val[feature_indices]
+                range_val = range_val[feature_indices]
+            # Ensure shapes match for broadcasting
+            if denormalized.ndim == 2 and min_val.ndim == 0:
+                denormalized = (denormalized * range_val) + min_val
+            else:
+                denormalized = (denormalized * range_val) + min_val
+    
+    return denormalized
+
+
 def plot_speed_vs_distance_scatter(
     sequences: List[np.ndarray],
     labels: List[int],
     feature_names: List[str] = FEATURE_COLUMNS,
+    normalizer_params: Dict = None,
     save_path: Path = None
 ):
     """
     Plot speed vs distance scatter plot colored by prediction.
     
     Args:
-        sequences: List of sequences
+        sequences: List of sequences (may be normalized)
         labels: True labels
         feature_names: Names of features
+        normalizer_params: Normalization parameters to denormalize features (optional)
         save_path: Path to save plot
     """
     # Extract last timestep features (most relevant for decision)
@@ -212,8 +281,48 @@ def plot_speed_vs_distance_scatter(
     speed_idx = feature_names.index('speed_ms') if 'speed_ms' in feature_names else 0
     distance_idx = feature_names.index('distance_to_stop_line') if 'distance_to_stop_line' in feature_names else 1
     
-    speeds = last_features[:, speed_idx]
-    distances = last_features[:, distance_idx]
+    # Denormalize if parameters are provided
+    if normalizer_params:
+        from .config import NORMALIZATION_METHOD
+        
+        # Extract normalized values
+        speed_normalized = last_features[:, speed_idx]
+        distance_normalized = last_features[:, distance_idx]
+        
+        # Get normalization parameters (convert to numpy arrays if they're lists)
+        if NORMALIZATION_METHOD == "standard":
+            mean = np.array(normalizer_params.get('mean', []))
+            std = np.array(normalizer_params.get('std', []))
+            if len(mean) > speed_idx and len(std) > speed_idx and std[speed_idx] > 0:
+                speeds = (speed_normalized * std[speed_idx]) + mean[speed_idx]
+                print(f"Denormalized speed: mean={mean[speed_idx]:.2f}, std={std[speed_idx]:.2f}, range=[{speeds.min():.2f}, {speeds.max():.2f}]")
+            else:
+                speeds = speed_normalized
+                print(f"Warning: Could not denormalize speed (idx={speed_idx}, mean_len={len(mean)}, std_len={len(std)})")
+            if len(mean) > distance_idx and len(std) > distance_idx and std[distance_idx] > 0:
+                distances = (distance_normalized * std[distance_idx]) + mean[distance_idx]
+                print(f"Denormalized distance: mean={mean[distance_idx]:.2f}, std={std[distance_idx]:.2f}, range=[{distances.min():.2f}, {distances.max():.2f}]")
+            else:
+                distances = distance_normalized
+                print(f"Warning: Could not denormalize distance (idx={distance_idx}, mean_len={len(mean)}, std_len={len(std)})")
+        elif NORMALIZATION_METHOD == "minmax":
+            min_val = np.array(normalizer_params.get('min', []))
+            range_val = np.array(normalizer_params.get('range', []))
+            if len(min_val) > speed_idx and len(range_val) > speed_idx and range_val[speed_idx] > 0:
+                speeds = (speed_normalized * range_val[speed_idx]) + min_val[speed_idx]
+            else:
+                speeds = speed_normalized
+            if len(min_val) > distance_idx and len(range_val) > distance_idx and range_val[distance_idx] > 0:
+                distances = (distance_normalized * range_val[distance_idx]) + min_val[distance_idx]
+            else:
+                distances = distance_normalized
+        else:
+            speeds = speed_normalized
+            distances = distance_normalized
+    else:
+        speeds = last_features[:, speed_idx]
+        distances = last_features[:, distance_idx]
+        print("Warning: No normalizer_params provided, showing normalized values")
     
     plt.figure(figsize=FIGURE_SIZE)
     
@@ -243,15 +352,17 @@ def plot_temporal_feature_evolution(
     sequences: List[np.ndarray],
     feature_name: str,
     feature_names: List[str] = FEATURE_COLUMNS,
+    normalizer_params: Dict = None,
     save_path: Path = None
 ):
     """
     Plot how a feature evolves over time in sequences.
     
     Args:
-        sequences: List of sequences
+        sequences: List of sequences (may be normalized)
         feature_name: Name of feature to plot
         feature_names: Names of features
+        normalizer_params: Normalization parameters to denormalize features (optional)
         save_path: Path to save plot
     """
     if feature_name not in feature_names:
@@ -261,6 +372,23 @@ def plot_temporal_feature_evolution(
     
     # Extract feature values over time
     feature_evolution = np.array([seq[:, feature_idx] for seq in sequences])
+    
+    # Denormalize if parameters are provided
+    if normalizer_params:
+        from .config import NORMALIZATION_METHOD
+        
+        if NORMALIZATION_METHOD == "standard":
+            mean = np.array(normalizer_params.get('mean', []))
+            std = np.array(normalizer_params.get('std', []))
+            if len(mean) > feature_idx and len(std) > feature_idx:
+                # Denormalize: (normalized * std) + mean
+                feature_evolution = (feature_evolution * std[feature_idx]) + mean[feature_idx]
+        elif NORMALIZATION_METHOD == "minmax":
+            min_val = np.array(normalizer_params.get('min', []))
+            range_val = np.array(normalizer_params.get('range', []))
+            if len(min_val) > feature_idx and len(range_val) > feature_idx:
+                # Denormalize: (normalized * range) + min
+                feature_evolution = (feature_evolution * range_val[feature_idx]) + min_val[feature_idx]
     
     # Compute mean and std
     mean_evolution = feature_evolution.mean(axis=0)
@@ -299,6 +427,7 @@ def generate_comprehensive_report(
     y_pred_proba: np.ndarray,
     train_losses: List[float] = None,
     val_losses: List[float] = None,
+    normalizer_params: Dict = None,
     output_dir: Path = None
 ):
     """
@@ -349,6 +478,7 @@ def generate_comprehensive_report(
     # Speed vs distance
     plot_speed_vs_distance_scatter(
         sequences, labels,
+        normalizer_params=normalizer_params,
         save_path=output_dir / 'speed_vs_distance.png'
     )
     
@@ -358,6 +488,7 @@ def generate_comprehensive_report(
         if feat_name in FEATURE_COLUMNS:
             plot_temporal_feature_evolution(
                 sequences, feat_name,
+                normalizer_params=normalizer_params,
                 save_path=output_dir / f'temporal_evolution_{feat_name}.png'
             )
     
@@ -379,11 +510,30 @@ def main():
         required=True,
         help='Path to model checkpoint'
     )
-    parser.add_argument(
+    
+    # Input data arguments (mutually exclusive)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
         '--csv_path',
         type=str,
-        required=True,
-        help='Path to CSV file'
+        help='Path to single CSV file with vehicle data'
+    )
+    input_group.add_argument(
+        '--csv_paths',
+        type=str,
+        nargs='+',
+        help='List of paths to multiple CSV files with vehicle data'
+    )
+    input_group.add_argument(
+        '--csv_directory',
+        type=str,
+        help='Directory containing CSV files to load'
+    )
+    parser.add_argument(
+        '--csv_pattern',
+        type=str,
+        default='*_speed_log*.csv',
+        help='Glob pattern for CSV files when using --csv_directory (default: "*_speed_log*.csv")'
     )
     parser.add_argument(
         '--output_dir',
@@ -408,11 +558,30 @@ def main():
     model, normalizer_params, _ = load_model(args.checkpoint_path, device)
     
     # Load sequences - need to use build_sequences_from_dataframe with normalizer params
-    from .utils import load_csv_data
+    from .utils import load_csv_data, load_multiple_csv_files, load_csv_files_from_directory
     from .sequence_builder import build_sequences_from_dataframe
     from .config import SEQUENCE_LENGTH
     
-    df = load_csv_data(args.csv_path)
+    # Determine which input method to use
+    input_count = sum([args.csv_path is not None, args.csv_paths is not None, args.csv_directory is not None])
+    if input_count == 0:
+        raise ValueError("Must provide one of: csv_path, csv_paths, or csv_directory")
+    if input_count > 1:
+        raise ValueError("Can only provide one of: csv_path, csv_paths, or csv_directory")
+    
+    if args.csv_directory:
+        df = load_csv_files_from_directory(args.csv_directory, pattern=args.csv_pattern, make_tracker_ids_unique=True)
+        print(f"Loaded data from directory: {args.csv_directory}")
+    elif args.csv_paths:
+        df = load_multiple_csv_files(args.csv_paths, make_tracker_ids_unique=True)
+        print(f"Loaded data from {len(args.csv_paths)} CSV files")
+    else:
+        df = load_csv_data(args.csv_path)
+        print(f"Loaded data from: {args.csv_path}")
+    
+    print(f"Total rows in dataset: {len(df)}")
+    print(f"Total unique vehicles: {len(df['tracker_id'].unique())}")
+    
     sequences, labels, _ = build_sequences_from_dataframe(
         df,
         sequence_length=SEQUENCE_LENGTH,
@@ -420,6 +589,19 @@ def main():
         fit_normalizer=False,
         normalizer_params=normalizer_params
     )
+    
+    print(f"Extracted {len(sequences)} sequences with labels")
+    print(f"  - GO sequences: {sum(1 for l in labels if l == 0)}")
+    print(f"  - STOP sequences: {sum(1 for l in labels if l == 1)}")
+    
+    # Debug: Check normalizer params
+    if normalizer_params:
+        print(f"\nNormalizer params available:")
+        if 'mean' in normalizer_params:
+            mean = np.array(normalizer_params['mean'])
+            std = np.array(normalizer_params['std'])
+            print(f"  Speed (idx 0): mean={mean[0]:.2f}, std={std[0]:.2f}")
+            print(f"  Distance (idx 1): mean={mean[1]:.2f}, std={std[1]:.2f}")
     
     # Get predictions
     y_pred_proba = predict(model, sequences, device)
@@ -443,6 +625,7 @@ def main():
         generate_comprehensive_report(
             sequences, labels, y_pred_proba,
             train_losses, val_losses,
+            normalizer_params=normalizer_params,
             output_dir=args.output_dir
         )
     else:
@@ -458,11 +641,11 @@ def main():
         elif args.plot_type == 'correlation':
             plot_correlation_matrix(sequences, save_path=output_dir / 'correlation_matrix.png')
         elif args.plot_type == 'scatter':
-            plot_speed_vs_distance_scatter(sequences, labels, save_path=output_dir / 'speed_vs_distance.png')
+            plot_speed_vs_distance_scatter(sequences, labels, normalizer_params=normalizer_params, save_path=output_dir / 'speed_vs_distance.png')
         elif args.plot_type == 'temporal':
             for feat_name in ['speed_ms', 'distance_to_stop_line', 'ttc']:
                 if feat_name in FEATURE_COLUMNS:
-                    plot_temporal_feature_evolution(sequences, feat_name, save_path=output_dir / f'temporal_evolution_{feat_name}.png')
+                    plot_temporal_feature_evolution(sequences, feat_name, normalizer_params=normalizer_params, save_path=output_dir / f'temporal_evolution_{feat_name}.png')
 
 
 if __name__ == '__main__':
