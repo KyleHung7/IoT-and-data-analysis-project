@@ -109,45 +109,232 @@ def plot_prediction_distribution(
 def plot_feature_distributions(
     sequences: List[np.ndarray],
     feature_names: List[str] = FEATURE_COLUMNS,
-    save_path: Path = None
+    normalizer_params: Dict = None,
+    labels: List[int] = None,
+    save_path: Path = None,
+    save_individual: bool = True
 ):
     """
     Plot distributions of features across sequences.
+    Creates separate charts for each feature, colored by GO/STOP decision.
     
     Args:
-        sequences: List of sequences
+        sequences: List of sequences (may be normalized)
         feature_names: Names of features
-        save_path: Path to save plot
+        normalizer_params: Normalization parameters to denormalize features (optional)
+        labels: List of labels (0=GO, 1=STOP) for each sequence (optional)
+        save_path: Path to save combined plot (optional, if None only saves individual)
+        save_individual: If True, save separate chart for each feature
     """
-    # Flatten sequences
+    from .config import NORMALIZATION_METHOD
+    
+    # Flatten sequences and labels
+    # Note: np.vstack preserves order, so we can match labels correctly
     all_features = np.vstack(sequences)
     
+    # Flatten labels to match feature rows (each sequence has multiple timesteps)
+    if labels is not None and len(labels) > 0:
+        # Repeat each label for all timesteps in its sequence
+        flattened_labels = []
+        for seq_idx, seq in enumerate(sequences):
+            label = labels[seq_idx] if seq_idx < len(labels) else 0
+            flattened_labels.extend([label] * len(seq))
+        flattened_labels = np.array(flattened_labels)
+        print(f"Flattened {len(sequences)} sequences with labels into {len(flattened_labels)} feature rows")
+        print(f"  GO (0): {np.sum(flattened_labels == 0)}, STOP (1): {np.sum(flattened_labels == 1)}")
+    else:
+        flattened_labels = None
+        print("No labels provided, plotting without GO/STOP distinction")
+    
+    # Denormalize if parameters are provided
+    if normalizer_params:
+        if NORMALIZATION_METHOD == "standard":
+            mean = np.array(normalizer_params.get('mean', []))
+            std = np.array(normalizer_params.get('std', []))
+            if len(mean) > 0 and len(std) > 0:
+                if len(mean) == all_features.shape[1] and len(std) == all_features.shape[1]:
+                    # Denormalize all features at once
+                    all_features = (all_features * std) + mean
+                    print(f"Denormalized features using standard scaling")
+                    print(f"  Feature ranges after denormalization:")
+                    for i, feat_name in enumerate(feature_names):
+                        feat_data = all_features[:, i]
+                        print(f"    {feat_name}: [{feat_data.min():.2f}, {feat_data.max():.2f}]")
+                else:
+                    print(f"Warning: Normalizer params shape mismatch. Features: {all_features.shape[1]}, Mean: {len(mean)}, Std: {len(std)}")
+            else:
+                print(f"Warning: Normalizer params empty. Mean: {len(mean)}, Std: {len(std)}")
+        elif NORMALIZATION_METHOD == "minmax":
+            min_val = np.array(normalizer_params.get('min', []))
+            range_val = np.array(normalizer_params.get('range', []))
+            if len(min_val) > 0 and len(range_val) > 0:
+                if len(min_val) == all_features.shape[1] and len(range_val) == all_features.shape[1]:
+                    # Denormalize all features at once
+                    all_features = (all_features * range_val) + min_val
+                    print(f"Denormalized features using min-max scaling")
+                    print(f"  Feature ranges after denormalization:")
+                    for i, feat_name in enumerate(feature_names):
+                        feat_data = all_features[:, i]
+                        print(f"    {feat_name}: [{feat_data.min():.2f}, {feat_data.max():.2f}]")
+                else:
+                    print(f"Warning: Normalizer params shape mismatch. Features: {all_features.shape[1]}, Min: {len(min_val)}, Range: {len(range_val)}")
+            else:
+                print(f"Warning: Normalizer params empty. Min: {len(min_val)}, Range: {len(range_val)}")
+    else:
+        print("Warning: No normalizer_params provided, showing normalized values")
+    
     n_features = len(feature_names)
-    n_cols = 3
-    n_rows = (n_features + n_cols - 1) // n_cols
     
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(FIGURE_SIZE[0] * 1.5, FIGURE_SIZE[1] * n_rows))
-    axes = axes.flatten() if n_features > 1 else [axes]
+    # Helper function to plot a single feature distribution
+    def plot_single_feature_distribution(feature_data, feature_name, flattened_labels, ax=None):
+        """Plot distribution of a single feature, colored by GO/STOP if labels provided.
+        
+        Returns:
+            xlabel: The label to use for x-axis (may differ from feature_name for speed_ms)
+        """
+        # Convert speed_ms to km/h for plotting
+        if feature_name == 'speed_ms':
+            feature_data = feature_data * 3.6  # Convert m/s to km/h
+            xlabel = 'speed_kmh'
+        else:
+            xlabel = feature_name
+        
+        # Filter out zeros (except for distance_to_stop_line where 0 is valid)
+        if feature_name != 'distance_to_stop_line':
+            if flattened_labels is not None:
+                # Filter both feature data and labels
+                non_zero_mask = feature_data != 0
+                feature_data_filtered = feature_data[non_zero_mask]
+                labels_filtered = flattened_labels[non_zero_mask]
+            else:
+                non_zero_mask = feature_data != 0
+                feature_data_filtered = feature_data[non_zero_mask]
+                labels_filtered = None
+        else:
+            # Keep all data for distance_to_stop_line (0 is valid)
+            feature_data_filtered = feature_data
+            labels_filtered = flattened_labels
+        
+        if len(feature_data_filtered) == 0:
+            if ax:
+                ax.text(0.5, 0.5, 'No non-zero data', ha='center', va='center', transform=ax.transAxes)
+            else:
+                plt.text(0.5, 0.5, 'No non-zero data', ha='center', va='center', transform=plt.gca().transAxes)
+            return xlabel
+        
+        # Plot with color coding if labels are provided
+        if labels_filtered is not None:
+            go_mask = labels_filtered == 0
+            stop_mask = labels_filtered == 1
+            
+            go_data = feature_data_filtered[go_mask]
+            stop_data = feature_data_filtered[stop_mask]
+            
+            # Create bins
+            data_min = feature_data_filtered.min()
+            data_max = feature_data_filtered.max()
+            # Use appropriate number of bins based on data range
+            n_bins = min(50, int((data_max - data_min) / max(0.1, (data_max - data_min) / 50)) + 1)
+            bins = np.linspace(data_min, data_max, n_bins)
+            
+            # Calculate histograms
+            go_counts, go_bin_edges = np.histogram(go_data, bins=bins)
+            stop_counts, stop_bin_edges = np.histogram(stop_data, bins=bins)
+            
+            # Calculate bin centers and width
+            bin_centers = (go_bin_edges[:-1] + go_bin_edges[1:]) / 2
+            bin_width = (go_bin_edges[1] - go_bin_edges[0]) * 0.5  # Half width for side-by-side bars
+            
+            # Plot side-by-side bars
+            if ax:
+                ax.bar(bin_centers - bin_width/2, go_counts, width=bin_width, 
+                      alpha=0.8, edgecolor='black', color='green', label='GO')
+                ax.bar(bin_centers + bin_width/2, stop_counts, width=bin_width, 
+                      alpha=0.8, edgecolor='black', color='red', label='STOP')
+                ax.legend()
+            else:
+                plt.bar(bin_centers - bin_width/2, go_counts, width=bin_width, 
+                       alpha=0.8, edgecolor='black', color='green', label='GO')
+                plt.bar(bin_centers + bin_width/2, stop_counts, width=bin_width, 
+                       alpha=0.8, edgecolor='black', color='red', label='STOP')
+                plt.legend()
+        else:
+            # No labels, use single color
+            bins = np.linspace(feature_data_filtered.min(), feature_data_filtered.max(), 50)
+            if ax:
+                ax.hist(feature_data_filtered, bins=bins, alpha=0.7, edgecolor='black', color='steelblue')
+            else:
+                plt.hist(feature_data_filtered, bins=bins, alpha=0.7, edgecolor='black', color='steelblue')
+        
+        return xlabel
     
-    for i, feature_name in enumerate(feature_names):
-        feature_data = all_features[:, i]
-        axes[i].hist(feature_data, bins=30, alpha=0.7, edgecolor='black')
-        axes[i].set_xlabel(feature_name)
-        axes[i].set_ylabel('Frequency')
-        axes[i].set_title(f'Distribution: {feature_name}')
-        axes[i].grid(True, alpha=0.3)
+    # Save individual charts
+    if save_individual and save_path:
+        save_dir = save_path.parent
+        save_stem = save_path.stem
+        for i, feature_name in enumerate(feature_names):
+            feature_data = all_features[:, i]
+            
+            # Create individual plot
+            plt.figure(figsize=FIGURE_SIZE)
+            xlabel = plot_single_feature_distribution(feature_data, feature_name, flattened_labels)
+            plt.xlabel(xlabel, fontsize=12, fontweight='bold')
+            plt.ylabel('Frequency', fontsize=12, fontweight='bold')
+            plt.title(f'Distribution: {xlabel}', fontsize=14, fontweight='bold')
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            
+            # Save individual chart
+            individual_path = save_dir / f'{save_stem}_{feature_name}.png'
+            plt.savefig(individual_path, dpi=DPI, bbox_inches='tight')
+            plt.close()
+            print(f"Feature distribution plot saved to: {individual_path}")
     
-    # Hide unused subplots
-    for i in range(n_features, len(axes)):
-        axes[i].axis('off')
-    
-    plt.tight_layout()
-    
+    # Create combined grid plot (optional)
     if save_path:
+        n_cols = 3
+        n_rows = (n_features + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(FIGURE_SIZE[0] * 1.5, FIGURE_SIZE[1] * n_rows))
+        axes = axes.flatten() if n_features > 1 else [axes]
+        
+        for i, feature_name in enumerate(feature_names):
+            feature_data = all_features[:, i]
+            xlabel = plot_single_feature_distribution(feature_data, feature_name, flattened_labels, ax=axes[i])
+            axes[i].set_xlabel(xlabel, fontsize=10)
+            axes[i].set_ylabel('Frequency', fontsize=10)
+            axes[i].set_title(f'Distribution: {xlabel}', fontsize=11)
+            axes[i].grid(True, alpha=0.3)
+        
+        # Hide unused subplots
+        for i in range(n_features, len(axes)):
+            axes[i].axis('off')
+        
+        plt.tight_layout()
         plt.savefig(save_path, dpi=DPI, bbox_inches='tight')
         plt.close()
-        print(f"Feature distribution plot saved to: {save_path}")
+        print(f"Combined feature distribution plot saved to: {save_path}")
     else:
+        # Show combined plot
+        n_cols = 3
+        n_rows = (n_features + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(FIGURE_SIZE[0] * 1.5, FIGURE_SIZE[1] * n_rows))
+        axes = axes.flatten() if n_features > 1 else [axes]
+        
+        for i, feature_name in enumerate(feature_names):
+            feature_data = all_features[:, i]
+            xlabel = plot_single_feature_distribution(feature_data, feature_name, flattened_labels, ax=axes[i])
+            axes[i].set_xlabel(xlabel)
+            axes[i].set_ylabel('Frequency')
+            axes[i].set_title(f'Distribution: {xlabel}')
+            axes[i].grid(True, alpha=0.3)
+        
+        # Hide unused subplots
+        for i in range(n_features, len(axes)):
+            axes[i].axis('off')
+        
+        plt.tight_layout()
         plt.show()
 
 
@@ -463,10 +650,13 @@ def generate_comprehensive_report(
         save_path=output_dir / 'prediction_distribution.png'
     )
     
-    # Feature distributions
+    # Feature distributions (with denormalization and individual charts)
     plot_feature_distributions(
         sequences,
-        save_path=output_dir / 'feature_distributions.png'
+        normalizer_params=normalizer_params,
+        labels=labels,
+        save_path=output_dir / 'feature_distributions.png',
+        save_individual=True
     )
     
     # Correlation matrix
@@ -637,7 +827,7 @@ def main():
         elif args.plot_type == 'predictions':
             plot_prediction_distribution(np.array(labels), y_pred_proba, output_dir / 'prediction_distribution.png')
         elif args.plot_type == 'features':
-            plot_feature_distributions(sequences, save_path=output_dir / 'feature_distributions.png')
+            plot_feature_distributions(sequences, normalizer_params=normalizer_params, labels=labels, save_path=output_dir / 'feature_distributions.png', save_individual=True)
         elif args.plot_type == 'correlation':
             plot_correlation_matrix(sequences, save_path=output_dir / 'correlation_matrix.png')
         elif args.plot_type == 'scatter':

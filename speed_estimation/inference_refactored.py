@@ -563,110 +563,41 @@ def visualize_rois(frame, source_polygon, traffic_light_roi, segment_boxes=None)
     return annotated_frame
 
 
-def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Vehicle Speed Estimation using YOLO 11 and Supervision"
-    )
-    parser.add_argument(
-        "--model_path",
-        default="yolo11x.pt",
-        help="Path to YOLO model file (default: yolo11x.pt)",
-        type=str,
-    )
-    parser.add_argument(
-        "--imgsz",
-        default=1280,
-        type=int,
-        help="Input image size for YOLO model (default: 1280). Higher values improve accuracy but slow inference. Common values: 640, 1280",
-    )
-    parser.add_argument(
-        "--source_video_path",
-        required=True,
-        help="Path to the source video file",
-        type=str,
-    )
-    parser.add_argument(
-        "--target_video_path",
-        default=None,
-        help="Path to the target video file (output). If not provided, will auto-generate from source video name.",
-        type=str,
-    )
-    parser.add_argument(
-        "--confidence_threshold",
-        default=0.4,
-        help="Confidence threshold for the model",
-        type=float,
-    )
-    parser.add_argument(
-        "--iou_threshold", default=0.7, help="IOU threshold for the model", type=float
-    )
-    parser.add_argument(
-        "--csv_output_path",                     # NEW
-        default=None,               # NEW
-        help="Path to the CSV file with speed data. If not provided, will auto-generate from source video name.",  # NEW
-        type=str,                                # NEW
-    )
-    parser.add_argument(
-        "--traffic_light_roi",
-        default=None,
-        help="Traffic light ROI coordinates as 'x1,y1,x2,y2' (rectangle) or 'x1,y1,x2,y2,x3,y3,x4,y4' (polygon)",
-        type=str,
-    )
-    parser.add_argument(
-        "--traffic_light_segments",
-        default=None,
-        help="Override per-light rectangles as 'x1,y1,x2,y2;x1,y1,x2,y2;x1,y1,x2,y2' for red, yellow, green.",
-        type=str,
-    )
-    parser.add_argument(
-        "--visualize_first_frame",
-        action="store_true",
-        help="Visualize the first frame with ROI polygons drawn to verify coordinates",
-    )
-    parser.add_argument(
-        "--segment_change_threshold",
-        default=12.0,
-        type=float,
-        help="Minimum HSV-V delta to mark a segment as changed/on.",
-    )
-    parser.add_argument(
-        "--segment_release_threshold",
-        default=6.0,
-        type=float,
-        help="Delta required to declare a segment off after it was on.",
-    )
-    parser.add_argument(
-        "--segment_min_intensity",
-        default=60.0,
-        type=float,
-        help="Minimum HSV-V intensity to consider a traffic light illuminated.",
-    )
-    parser.add_argument(
-        "--initial_on_threshold",
-        default=80.0,
-        type=float,
-        help="Absolute intensity threshold for detecting lights already on at video start (default: 80.0).",
-    )
-    parser.add_argument(
-        "--initialization_frames",
-        default=10,
-        type=int,
-        help="Number of frames to use for initial state detection (default: 10).",
-    )
-
-    return parser.parse_args()
-
-
-if __name__ == "__main__":
-    args = parse_arguments()
-
+def process_video(
+    source_video_path: str,
+    model_path: str = "yolo11x.pt",
+    imgsz: int = 1280,
+    target_video_path: str = None,
+    csv_output_path: str = None,
+    confidence_threshold: float = 0.4,
+    iou_threshold: float = 0.7,
+    traffic_light_roi: str = None,
+    traffic_light_segments: str = None,
+    visualize_first_frame: bool = False,
+    segment_change_threshold: float = 12.0,
+    segment_release_threshold: float = 6.0,
+    segment_min_intensity: float = 60.0,
+    initial_on_threshold: float = 80.0,
+    initialization_frames: int = 10,
+):
+    """
+    Process a single video file for vehicle speed estimation.
+    
+    Args:
+        source_video_path: Path to source video file
+        model_path: Path to YOLO model file
+        imgsz: Input image size for YOLO
+        target_video_path: Output video path (auto-generated if None)
+        csv_output_path: Output CSV path (auto-generated if None)
+        ... (other parameters)
+    """
     # Auto-generate output paths if not provided
-    source_path = Path(args.source_video_path)
+    source_path = Path(source_video_path)
     source_stem = source_path.stem  # filename without extension
     source_dir = source_path.parent
     
     # Generate target video path if not provided
-    if args.target_video_path is None:
+    if target_video_path is None:
         # Try to find a unique filename
         counter = 0
         while True:
@@ -677,13 +608,13 @@ if __name__ == "__main__":
             
             target_path = source_dir / target_filename
             if not target_path.exists():
-                args.target_video_path = str(target_path)
+                target_video_path = str(target_path)
                 break
             counter += 1
-        print(f"Auto-generated target video path: {args.target_video_path}")
+        print(f"Auto-generated target video path: {target_video_path}")
     
     # Generate CSV output path if not provided
-    if args.csv_output_path is None:
+    if csv_output_path is None:
         # Try to find a unique filename
         counter = 0
         while True:
@@ -694,29 +625,29 @@ if __name__ == "__main__":
             
             csv_path = source_dir / csv_filename
             if not csv_path.exists():
-                args.csv_output_path = str(csv_path)
+                csv_output_path = str(csv_path)
                 break
             counter += 1
-        print(f"Auto-generated CSV output path: {args.csv_output_path}")
+        print(f"Auto-generated CSV output path: {csv_output_path}")
 
     # Parse traffic light ROI coordinates if provided, otherwise use default
-    traffic_light_roi = TRAFFIC_LIGHT_ROI  # Use default polygon
-    if args.traffic_light_roi:
+    traffic_light_roi_parsed = TRAFFIC_LIGHT_ROI  # Use default polygon
+    if traffic_light_roi:
         try:
-            coords = [int(x.strip()) for x in args.traffic_light_roi.split(',')]
+            coords = [int(x.strip()) for x in traffic_light_roi.split(',')]
             if len(coords) == 4:
                 # Rectangle format (x1, y1, x2, y2)
-                traffic_light_roi = tuple(coords)
-                print(f"Traffic light ROI set to rectangle: {traffic_light_roi}")
+                traffic_light_roi_parsed = tuple(coords)
+                print(f"Traffic light ROI set to rectangle: {traffic_light_roi_parsed}")
             elif len(coords) == 8:
                 # Polygon format (x1, y1, x2, y2, x3, y3, x4, y4)
-                traffic_light_roi = np.array([[coords[0], coords[1]], 
-                                             [coords[2], coords[3]], 
-                                             [coords[4], coords[5]], 
-                                             [coords[6], coords[7]]])
-                print(f"Traffic light ROI set to polygon: {traffic_light_roi}")
+                traffic_light_roi_parsed = np.array([[coords[0], coords[1]], 
+                                                     [coords[2], coords[3]], 
+                                                     [coords[4], coords[5]], 
+                                                     [coords[6], coords[7]]])
+                print(f"Traffic light ROI set to polygon: {traffic_light_roi_parsed}")
             else:
-                print(f"Warning: Invalid traffic light ROI format. Expected 'x1,y1,x2,y2' or 'x1,y1,x2,y2,x3,y3,x4,y4', got: {args.traffic_light_roi}")
+                print(f"Warning: Invalid traffic light ROI format. Expected 'x1,y1,x2,y2' or 'x1,y1,x2,y2,x3,y3,x4,y4', got: {traffic_light_roi}")
                 print(f"Using default ROI: {TRAFFIC_LIGHT_ROI}")
         except ValueError as e:
             print(f"Warning: Could not parse traffic light ROI: {e}")
@@ -724,11 +655,11 @@ if __name__ == "__main__":
     else:
         print(f"Using default traffic light ROI (polygon): {TRAFFIC_LIGHT_ROI}")
 
-    video_info = sv.VideoInfo.from_video_path(video_path=args.source_video_path)
-    model = YOLO(args.model_path)
+    video_info = sv.VideoInfo.from_video_path(video_path=source_video_path)
+    model = YOLO(model_path)
 
     byte_track = sv.ByteTrack(
-        frame_rate=video_info.fps, track_activation_threshold=args.confidence_threshold
+        frame_rate=video_info.fps, track_activation_threshold=confidence_threshold
     )
 
     thickness = sv.calculate_optimal_line_thickness(
@@ -748,28 +679,28 @@ if __name__ == "__main__":
         position=sv.Position.BOTTOM_CENTER,
     )
 
-    frame_generator = sv.get_video_frames_generator(source_path=args.source_video_path)
+    frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
 
     polygon_zone = sv.PolygonZone(polygon=SOURCE)
     view_transformer = ViewTransformer(source=SOURCE, target=TARGET)
     stop_line_points_topview = view_transformer.transform_points(STOP_LINE.astype(np.float32))
     stop_line_y_topview = float(np.mean(stop_line_points_topview[:, 1])) if len(stop_line_points_topview) > 0 else None
 
-    traffic_light_segments = derive_segment_boxes(traffic_light_roi)
-    if args.traffic_light_segments:
+    traffic_light_segments_parsed = derive_segment_boxes(traffic_light_roi_parsed)
+    if traffic_light_segments:
         try:
-            traffic_light_segments = parse_segment_overrides(args.traffic_light_segments)
-            print(f"Traffic light segments overridden: {traffic_light_segments}")
+            traffic_light_segments_parsed = parse_segment_overrides(traffic_light_segments)
+            print(f"Traffic light segments overridden: {traffic_light_segments_parsed}")
         except ValueError as exc:
             print(f"Warning: {exc}. Falling back to ROI-derived segments.")
 
     traffic_light_detector = TrafficLightChangeDetector(
-        segment_boxes=traffic_light_segments,
-        on_change_threshold=args.segment_change_threshold,
-        off_change_threshold=args.segment_release_threshold,
-        min_intensity=args.segment_min_intensity,
-        initial_on_threshold=args.initial_on_threshold,
-        initialization_frames=args.initialization_frames,
+        segment_boxes=traffic_light_segments_parsed,
+        on_change_threshold=segment_change_threshold,
+        off_change_threshold=segment_release_threshold,
+        min_intensity=segment_min_intensity,
+        initial_on_threshold=initial_on_threshold,
+        initialization_frames=initialization_frames,
     )
 
     csv_rows = []
@@ -779,18 +710,18 @@ if __name__ == "__main__":
     previous_yellow_active = False
 
     # Optional: Visualize first frame to verify coordinates
-    if args.visualize_first_frame:
+    if visualize_first_frame:
         try:
             first_frame = next(frame_generator)
-            first_frame_viz = visualize_rois(first_frame, SOURCE, traffic_light_roi, traffic_light_segments)
+            first_frame_viz = visualize_rois(first_frame, SOURCE, traffic_light_roi_parsed, traffic_light_segments_parsed)
             sv.plot_image(first_frame_viz)
             print("First frame visualization displayed. Close the window to continue processing.")
             # Reset generator
-            frame_generator = sv.get_video_frames_generator(source_path=args.source_video_path)
+            frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
         except StopIteration:
             print("Warning: Could not read first frame for visualization")
 
-    with sv.VideoSink(args.target_video_path, video_info) as sink:
+    with sv.VideoSink(target_video_path, video_info) as sink:
         for frame in frame_generator:
             red_on, yellow_on, green_on, detected_status, segment_states = traffic_light_detector.detect(frame)
             if red_on:
@@ -812,11 +743,11 @@ if __name__ == "__main__":
                         state["pending"] = False
                         state["pending_since"] = None
             
-            results = model(frame, imgsz=args.imgsz)[0]
+            results = model(frame, imgsz=imgsz)[0]
             detections = sv.Detections.from_ultralytics(results)
-            detections = detections[detections.confidence > args.confidence_threshold]
+            detections = detections[detections.confidence > confidence_threshold]
             detections = detections[polygon_zone.trigger(detections)]
-            detections = detections.with_nms(threshold=args.iou_threshold)
+            detections = detections.with_nms(threshold=iou_threshold)
             
             # Filter out non-vehicle detections and small cars
             if (
@@ -995,7 +926,7 @@ if __name__ == "__main__":
                 thickness=1
             )
             
-            if traffic_light_roi is not None or traffic_light_segments:
+            if traffic_light_roi_parsed is not None or traffic_light_segments_parsed:
                 if red_on:
                     roi_color = sv.Color(255, 0, 0)
                 elif yellow_on:
@@ -1005,25 +936,25 @@ if __name__ == "__main__":
                 else:
                     roi_color = sv.Color(128, 128, 128)
 
-                if traffic_light_roi is not None:
-                    if isinstance(traffic_light_roi, np.ndarray) and len(traffic_light_roi.shape) == 2:
+                if traffic_light_roi_parsed is not None:
+                    if isinstance(traffic_light_roi_parsed, np.ndarray) and len(traffic_light_roi_parsed.shape) == 2:
                         annotated_frame = sv.draw_polygon(
                             scene=annotated_frame,
-                            polygon=traffic_light_roi,
+                            polygon=traffic_light_roi_parsed,
                             color=roi_color,
                             thickness=1
                         )
-                    elif isinstance(traffic_light_roi, tuple) and len(traffic_light_roi) == 4:
-                        x1, y1, x2, y2 = traffic_light_roi
+                    elif isinstance(traffic_light_roi_parsed, tuple) and len(traffic_light_roi_parsed) == 4:
+                        x1, y1, x2, y2 = traffic_light_roi_parsed
                         cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), roi_color.as_bgr(), 2)
 
-                if traffic_light_segments:
+                if traffic_light_segments_parsed:
                     color_lookup = {
                         "red": (0, 0, 255),
                         "yellow": (0, 255, 255),
                         "green": (0, 255, 0),
                     }
-                    for name, (x1, y1, x2, y2) in traffic_light_segments.items():
+                    for name, (x1, y1, x2, y2) in traffic_light_segments_parsed.items():
                         active = segment_states.get(name, False)
                         color = color_lookup.get(name, (200, 200, 200)) if active else (120, 120, 120)
                         thickness_value = 1
@@ -1075,13 +1006,10 @@ if __name__ == "__main__":
             )
 
             sink.write_frame(annotated_frame)
-            # cv2.imshow("frame", annotated_frame)
-            # if cv2.waitKey(1) & 0xFF == ord("q"):
-            #     break
             frame_index += 1
             previous_yellow_active = yellow_active
-        # cv2.destroyAllWindows()
     
+    # Write CSV file
     fieldnames = [
         "frame_index",
         "tracker_id",
@@ -1098,9 +1026,183 @@ if __name__ == "__main__":
         "pending_yellow_decision",
         "yellow_light_decision",
     ]
-    os.makedirs(os.path.dirname(args.csv_output_path), exist_ok=True) if os.path.dirname(args.csv_output_path) else None
+    os.makedirs(os.path.dirname(csv_output_path), exist_ok=True) if os.path.dirname(csv_output_path) else None
 
-    with open(args.csv_output_path, "w", newline="") as f:
+    with open(csv_output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(csv_rows)
+    
+    print(f"\nProcessing complete for: {source_video_path}")
+    print(f"  Output video: {target_video_path}")
+    print(f"  Output CSV: {csv_output_path}")
+    print(f"  Total frames: {frame_index}")
+    print(f"  Total detections logged: {len(csv_rows)}")
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Vehicle Speed Estimation using YOLO 11 and Supervision"
+    )
+    parser.add_argument(
+        "--model_path",
+        default="yolo11x.pt",
+        help="Path to YOLO model file (default: yolo11x.pt)",
+        type=str,
+    )
+    parser.add_argument(
+        "--imgsz",
+        default=1280,
+        type=int,
+        help="Input image size for YOLO model (default: 1280). Higher values improve accuracy but slow inference. Common values: 640, 1280",
+    )
+    
+    # Input arguments (mutually exclusive)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
+        "--source_video_path",
+        help="Path to a single source video file",
+        type=str,
+    )
+    input_group.add_argument(
+        "--source_video_directory",
+        help="Directory containing video files to process (processes all .mp4 files)",
+        type=str,
+    )
+    input_group.add_argument(
+        "--source_video_pattern",
+        default="*.mp4",
+        help="Glob pattern for video files when using --source_video_directory (default: *.mp4)",
+        type=str,
+    )
+    parser.add_argument(
+        "--target_video_path",
+        default=None,
+        help="Path to the target video file (output). If not provided, will auto-generate from source video name.",
+        type=str,
+    )
+    parser.add_argument(
+        "--confidence_threshold",
+        default=0.4,
+        help="Confidence threshold for the model",
+        type=float,
+    )
+    parser.add_argument(
+        "--iou_threshold", default=0.7, help="IOU threshold for the model", type=float
+    )
+    parser.add_argument(
+        "--csv_output_path",                     # NEW
+        default=None,               # NEW
+        help="Path to the CSV file with speed data. If not provided, will auto-generate from source video name.",  # NEW
+        type=str,                                # NEW
+    )
+    parser.add_argument(
+        "--traffic_light_roi",
+        default=None,
+        help="Traffic light ROI coordinates as 'x1,y1,x2,y2' (rectangle) or 'x1,y1,x2,y2,x3,y3,x4,y4' (polygon)",
+        type=str,
+    )
+    parser.add_argument(
+        "--traffic_light_segments",
+        default=None,
+        help="Override per-light rectangles as 'x1,y1,x2,y2;x1,y1,x2,y2;x1,y1,x2,y2' for red, yellow, green.",
+        type=str,
+    )
+    parser.add_argument(
+        "--visualize_first_frame",
+        action="store_true",
+        help="Visualize the first frame with ROI polygons drawn to verify coordinates",
+    )
+    parser.add_argument(
+        "--segment_change_threshold",
+        default=12.0,
+        type=float,
+        help="Minimum HSV-V delta to mark a segment as changed/on.",
+    )
+    parser.add_argument(
+        "--segment_release_threshold",
+        default=6.0,
+        type=float,
+        help="Delta required to declare a segment off after it was on.",
+    )
+    parser.add_argument(
+        "--segment_min_intensity",
+        default=60.0,
+        type=float,
+        help="Minimum HSV-V intensity to consider a traffic light illuminated.",
+    )
+    parser.add_argument(
+        "--initial_on_threshold",
+        default=80.0,
+        type=float,
+        help="Absolute intensity threshold for detecting lights already on at video start (default: 80.0).",
+    )
+    parser.add_argument(
+        "--initialization_frames",
+        default=10,
+        type=int,
+        help="Number of frames to use for initial state detection (default: 10).",
+    )
+
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_arguments()
+    
+    # Determine if processing single file or directory
+    video_files = []
+    
+    if args.source_video_path:
+        # Single video file
+        video_files = [args.source_video_path]
+    elif args.source_video_directory:
+        # Directory of videos
+        video_dir = Path(args.source_video_directory)
+        if not video_dir.exists():
+            raise ValueError(f"Directory not found: {video_dir}")
+        
+        pattern = args.source_video_pattern
+        video_files = sorted(video_dir.glob(pattern))
+        if not video_files:
+            raise ValueError(f"No video files found matching pattern '{pattern}' in {video_dir}")
+        
+        print(f"Found {len(video_files)} video files to process:")
+        for vf in video_files:
+            print(f"  - {vf.name}")
+    
+    # Process each video file
+    total_videos = len(video_files)
+    for idx, video_path in enumerate(video_files, 1):
+        print(f"\n{'='*80}")
+        print(f"Processing video {idx}/{total_videos}: {video_path.name}")
+        print(f"{'='*80}")
+        
+        try:
+            process_video(
+                source_video_path=str(video_path),
+                model_path=args.model_path,
+                imgsz=args.imgsz,
+                target_video_path=args.target_video_path if hasattr(args, 'target_video_path') and args.target_video_path else None,
+                csv_output_path=args.csv_output_path if hasattr(args, 'csv_output_path') and args.csv_output_path else None,
+                confidence_threshold=args.confidence_threshold,
+                iou_threshold=args.iou_threshold,
+                traffic_light_roi=args.traffic_light_roi,
+                traffic_light_segments=args.traffic_light_segments,
+                visualize_first_frame=args.visualize_first_frame,
+                segment_change_threshold=args.segment_change_threshold,
+                segment_release_threshold=args.segment_release_threshold,
+                segment_min_intensity=args.segment_min_intensity,
+                initial_on_threshold=args.initial_on_threshold,
+                initialization_frames=args.initialization_frames,
+            )
+        except Exception as e:
+            print(f"ERROR processing {video_path.name}: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"Skipping to next video...")
+            continue
+    
+    print(f"\n{'='*80}")
+    print(f"Batch processing complete! Processed {total_videos} video(s).")
+    print(f"{'='*80}")
