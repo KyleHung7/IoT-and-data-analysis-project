@@ -108,7 +108,26 @@ def compute_shap_values(
             explainer = shap.DeepExplainer(model, background_tensor)
             test_tensor = torch.FloatTensor(test_data).to(device)
             # Disable additivity check to avoid errors with sigmoid
-            shap_values = explainer.shap_values(test_tensor, check_additivity=False)
+            shap_values_raw = explainer.shap_values(test_tensor, check_additivity=False)
+            
+            # Handle list output (binary classification)
+            if isinstance(shap_values_raw, list):
+                shap_values_raw = shap_values_raw[0]
+            shap_values_array = np.array(shap_values_raw)
+            
+            # Get base value
+            base_val = explainer.expected_value
+            if isinstance(base_val, list):
+                base_val = base_val[0]
+            base_values = np.array([base_val] * len(shap_values_array))
+            
+            # Create SHAP Explanation object
+            shap_values = shap.Explanation(
+                values=shap_values_array,
+                base_values=base_values,
+                data=test_data,
+                feature_names=[f"{feat}_t{t}" for t in range(SEQUENCE_LENGTH) for feat in FEATURE_COLUMNS]
+            )
         except Exception as e:
             print(f"Warning: DeepExplainer failed ({e}), falling back to KernelExplainer")
             explainer_type = "kernel"
@@ -148,6 +167,91 @@ def compute_shap_values(
     return shap_values, explainer
 
 
+def aggregate_shap_by_feature(shap_values, test_data: np.ndarray) -> shap.Explanation:
+    """
+    Aggregate SHAP values by feature (average over timesteps).
+    
+    Args:
+        shap_values: SHAP Explanation object with shape (n_samples, seq_len, feat_dim) or numpy array
+        test_data: Test data with shape (n_samples, seq_len, feat_dim)
+        
+    Returns:
+        Aggregated SHAP Explanation object with shape (n_samples, feat_dim)
+    """
+    if isinstance(shap_values, list):
+        shap_values = shap_values[0]
+    
+    # Extract values from Explanation object or use directly if numpy array
+    if isinstance(shap_values, shap.Explanation):
+        shap_array = shap_values.values
+        base_values = shap_values.base_values
+        if isinstance(base_values, np.ndarray) and base_values.ndim > 0:
+            base_value = float(base_values[0]) if len(base_values) > 0 else 0.0
+        else:
+            base_value = float(base_values) if not isinstance(base_values, (list, np.ndarray)) else 0.0
+    else:
+        # Assume it's a numpy array
+        shap_array = np.array(shap_values)
+        base_value = 0.0
+    
+    # Handle 4D arrays: (n_samples, seq_len, feat_dim, 1) -> (n_samples, seq_len, feat_dim)
+    if shap_array.ndim == 4:
+        if shap_array.shape[-1] == 1:
+            shap_array = shap_array.squeeze(axis=-1)
+        else:
+            raise ValueError(f"Unexpected 4D SHAP array shape: {shap_array.shape}")
+    
+    # Squeeze out any remaining singleton dimensions
+    shap_array = np.squeeze(shap_array)
+    
+    # Handle different input shapes
+    if shap_array.ndim == 3:
+        # (n_samples, seq_len, feat_dim) - average over timesteps
+        n_samples = shap_array.shape[0]
+        shap_agg = shap_array.mean(axis=1)  # (n_samples, feat_dim)
+    elif shap_array.ndim == 2:
+        # Check if it's already aggregated or flattened
+        if shap_array.shape[1] == FEATURE_DIM:
+            # Already aggregated (n_samples, feat_dim)
+            shap_agg = shap_array
+        else:
+            # Flattened (n_samples, seq_len * feat_dim) - reshape first
+            n_samples = shap_array.shape[0]
+            shap_array = shap_array.reshape(n_samples, SEQUENCE_LENGTH, FEATURE_DIM)
+            shap_agg = shap_array.mean(axis=1)  # (n_samples, feat_dim)
+    else:
+        raise ValueError(f"Unexpected SHAP array shape after squeezing: {shap_array.shape}")
+    
+    # Average test data over timesteps for feature values
+    if test_data.ndim == 3:
+        test_agg = test_data.mean(axis=1)  # (n_samples, feat_dim)
+    elif test_data.ndim == 2:
+        if test_data.shape[1] == FEATURE_DIM:
+            # Already aggregated
+            test_agg = test_data
+        else:
+            # Flattened - reshape first
+            n_samples = test_data.shape[0]
+            test_data = test_data.reshape(n_samples, SEQUENCE_LENGTH, FEATURE_DIM)
+            test_agg = test_data.mean(axis=1)  # (n_samples, feat_dim)
+    else:
+        raise ValueError(f"Unexpected test_data shape: {test_data.shape}")
+    
+    # Ensure shapes match
+    if shap_agg.shape != test_agg.shape:
+        raise ValueError(f"Shape mismatch: shap_agg {shap_agg.shape} vs test_agg {test_agg.shape}")
+    
+    # Create aggregated Explanation object
+    shap_agg_explanation = shap.Explanation(
+        values=shap_agg,
+        base_values=np.array([base_value] * len(shap_agg)),
+        data=test_agg,
+        feature_names=FEATURE_COLUMNS[:shap_agg.shape[1]]
+    )
+    
+    return shap_agg_explanation
+
+
 def get_feature_importance(shap_values: shap.Explanation) -> Dict[str, float]:
     """
     Get feature importance from SHAP values.
@@ -177,30 +281,94 @@ def get_feature_importance(shap_values: shap.Explanation) -> Dict[str, float]:
     return importance_dict
 
 
-def plot_shap_summary(shap_values, save_path: Path, max_display: int = 10):
+def plot_shap_summary(
+    shap_values, 
+    test_data: np.ndarray = None,
+    save_path: Path = None, 
+    max_display: int = 20,
+    plot_type: str = "dot"
+):
     """
-    Plot SHAP summary plot.
+    Plot SHAP summary plot (dot plot or bar plot).
+    
+    Args:
+        shap_values: SHAP Explanation object or array
+        test_data: Test data corresponding to SHAP values (optional, for dot plot)
+        save_path: Path to save plot
+        max_display: Maximum number of features to display
+        plot_type: Type of plot - "dot" for summary plot, "bar" for bar plot
     """
+    if not SHAP_AVAILABLE:
+        print("Warning: SHAP not available. Cannot generate summary plot.")
+        return
+    
     try:
-        plt.figure(figsize=FIGURE_SIZE)
-        
+        # Handle list of SHAP values (binary classification)
         if isinstance(shap_values, list):
             shap_values = shap_values[0]
         
-        # Try summary plot, fall back to bar plot if it fails
-        try:
-            shap.summary_plot(shap_values, show=False, max_display=max_display)
-        except Exception as e:
-            print(f"Warning: SHAP summary plot failed ({e}), using bar plot instead")
-            # Use bar plot as fallback
-            shap.plots.bar(shap_values, show=False, max_display=max_display)
+        # If shap_values is not a SHAP Explanation object, create one
+        if not isinstance(shap_values, shap.Explanation):
+            # Assume it's a numpy array
+            if test_data is None:
+                raise ValueError("test_data required when shap_values is not a SHAP Explanation object")
+            
+            # Determine if it's already flattened or 3D
+            if shap_values.ndim == 3:
+                # (n_samples, seq_len, feat_dim) - flatten
+                n_samples = shap_values.shape[0]
+                shap_flat = shap_values.reshape(n_samples, -1)
+                test_flat = test_data.reshape(n_samples, -1)
+                feature_names = [f"{feat}_t{t}" for t in range(SEQUENCE_LENGTH) for feat in FEATURE_COLUMNS]
+            else:
+                # Already flattened
+                shap_flat = shap_values
+                test_flat = test_data
+                feature_names = FEATURE_COLUMNS if test_flat.shape[1] == len(FEATURE_COLUMNS) else [f"feature_{i}" for i in range(test_flat.shape[1])]
+            
+            # Get base value (mean prediction)
+            base_value = 0.0  # Default, will be calculated if available
+            
+            shap_values = shap.Explanation(
+                values=shap_flat,
+                base_values=np.array([base_value] * len(shap_flat)),
+                data=test_flat,
+                feature_names=feature_names[:shap_flat.shape[1]]
+            )
+        
+        # Generate summary plot
+        if plot_type == "dot":
+            # Dot plot (shows feature values colored by SHAP values)
+            # Use larger figure size for better visibility
+            plt.figure(figsize=(12, max(8, min(max_display * 0.4, 20))))
+            shap.summary_plot(
+                shap_values, 
+                show=False, 
+                max_display=max_display,
+                plot_type="dot"
+            )
+        else:
+            # Bar plot (shows mean absolute SHAP values)
+            plt.figure(figsize=(10, max(6, min(max_display * 0.3, 15))))
+            shap.plots.bar(
+                shap_values, 
+                show=False, 
+                max_display=max_display
+            )
         
         plt.tight_layout()
-        plt.savefig(save_path, dpi=DPI, bbox_inches='tight')
-        plt.close()
-        print(f"SHAP summary plot saved to: {save_path}")
+        
+        if save_path:
+            plt.savefig(save_path, dpi=DPI, bbox_inches='tight')
+            plt.close()
+            print(f"SHAP summary plot ({plot_type}) saved to: {save_path}")
+        else:
+            plt.show()
+            
     except Exception as e:
         print(f"Warning: Could not generate SHAP summary plot: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def plot_shap_force_plot(
@@ -251,7 +419,7 @@ def plot_shap_force_plot(
 
 
 def plot_temporal_attribution(
-    shap_values: shap.Explanation,
+    shap_values,
     save_path: Path
 ):
     """
@@ -260,13 +428,47 @@ def plot_temporal_attribution(
     if isinstance(shap_values, list):
         shap_values = shap_values[0]
     
-    # Average SHAP values over samples, get per timestep
-    # shap_values shape: (n_samples, seq_len, feat_dim)
-    temporal_importance = np.abs(shap_values.values).mean(axis=0)  # (seq_len, feat_dim)
+    # Extract values from Explanation object or use directly
+    if isinstance(shap_values, shap.Explanation):
+        shap_array = shap_values.values
+    else:
+        shap_array = np.array(shap_values)
+    
+    # Handle 4D arrays: (n_samples, seq_len, feat_dim, 1) -> (n_samples, seq_len, feat_dim)
+    if shap_array.ndim == 4:
+        # Squeeze last dimension if it's 1
+        if shap_array.shape[-1] == 1:
+            shap_array = shap_array.squeeze(axis=-1)
+        else:
+            raise ValueError(f"Unexpected 4D SHAP array shape: {shap_array.shape}")
+    
+    # Squeeze out any remaining singleton dimensions
+    shap_array = np.squeeze(shap_array)
+    
+    # Ensure we have the right shape: (n_samples, seq_len, feat_dim)
+    if shap_array.ndim == 2:
+        # If 2D, assume it's (n_samples, flattened) and reshape
+        n_samples = shap_array.shape[0]
+        shap_array = shap_array.reshape(n_samples, SEQUENCE_LENGTH, FEATURE_DIM)
+    elif shap_array.ndim == 3:
+        # Already 3D, but check if first dimension is 1 (single sample)
+        if shap_array.shape[0] == 1:
+            shap_array = shap_array[0]  # Remove singleton dimension: (seq_len, feat_dim)
+            # Average over samples (but we only have one, so just use it)
+            temporal_importance = np.abs(shap_array)  # (seq_len, feat_dim)
+        else:
+            # Average SHAP values over samples, get per timestep
+            temporal_importance = np.abs(shap_array).mean(axis=0)  # (seq_len, feat_dim)
+    else:
+        raise ValueError(f"Unexpected SHAP values shape after squeezing: {shap_array.shape} (original may have been 4D)")
+    
+    # Ensure 2D for heatmap
+    if temporal_importance.ndim != 2:
+        raise ValueError(f"Expected 2D array for heatmap, got shape: {temporal_importance.shape}")
     
     plt.figure(figsize=FIGURE_SIZE)
     
-    # Plot heatmap
+    # Plot heatmap - transpose so features are rows, timesteps are columns
     sns.heatmap(
         temporal_importance.T,
         xticklabels=[f"t-{SEQUENCE_LENGTH-i}" for i in range(SEQUENCE_LENGTH)],
@@ -415,10 +617,66 @@ def generate_explainability_report(
     # Generate plots
     print("\nGenerating SHAP plots...")
     
-    # Summary plot
-    plot_shap_summary(shap_values, output_dir / 'shap_summary.png')
+    # Aggregate SHAP values by feature (average over timesteps) for cleaner summary plots
+    print("  - Aggregating SHAP values by feature...")
+    try:
+        shap_values_agg = aggregate_shap_by_feature(shap_values, test_array)
+        
+        # Summary plots (both dot and bar) - aggregated by feature
+        print("  - Generating SHAP summary plot (dot) - aggregated by feature...")
+        plot_shap_summary(
+            shap_values_agg, 
+            test_data=None,  # Already included in Explanation object
+            save_path=output_dir / 'shap_summary_dot.png',
+            plot_type="dot",
+            max_display=len(FEATURE_COLUMNS)
+        )
+        
+        print("  - Generating SHAP summary plot (bar) - aggregated by feature...")
+        plot_shap_summary(
+            shap_values_agg,
+            test_data=None,
+            save_path=output_dir / 'shap_summary_bar.png',
+            plot_type="bar",
+            max_display=len(FEATURE_COLUMNS)
+        )
+    except Exception as e:
+        print(f"Warning: Could not generate aggregated summary plots: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Also generate full temporal summary plot (all timesteps) - flatten for SHAP
+    print("  - Generating SHAP summary plot (bar) - full temporal (flattened)...")
+    try:
+        # Flatten the temporal data for SHAP summary plot
+        if isinstance(shap_values, shap.Explanation):
+            shap_flat = shap_values.values.reshape(len(shap_values.values), -1)
+            test_flat = shap_values.data.reshape(len(shap_values.data), -1)
+            feature_names_flat = [f"{feat}_t{t}" for t in range(SEQUENCE_LENGTH) for feat in FEATURE_COLUMNS]
+            
+            shap_flat_explanation = shap.Explanation(
+                values=shap_flat,
+                base_values=shap_values.base_values,
+                data=test_flat,
+                feature_names=feature_names_flat[:shap_flat.shape[1]]
+            )
+            
+            plot_shap_summary(
+                shap_flat_explanation, 
+                test_data=None,
+                save_path=output_dir / 'shap_summary_temporal_bar.png',
+                plot_type="bar",
+                max_display=min(30, shap_flat.shape[1])
+            )
+        else:
+            print("  - Skipping temporal summary plot (shap_values not in expected format)")
+    except Exception as e:
+        print(f"Warning: Could not generate temporal summary plot: {e}")
+        import traceback
+        traceback.print_exc()
     
     # Temporal attribution
+    print("  - Generating temporal attribution plot...")
     plot_temporal_attribution(shap_values, output_dir / 'temporal_attribution.png')
     
     # Force plots for a few samples
@@ -460,7 +718,8 @@ def main():
     """
     import argparse
     from .evaluate_model import load_model
-    from .sequence_builder import build_sequences_from_csv
+    from .sequence_builder import build_sequences_from_dataframe
+    from .utils import load_csv_data, load_multiple_csv_files, load_csv_files_from_directory
     
     parser = argparse.ArgumentParser(description='Generate Explainability Report')
     parser.add_argument(
@@ -469,11 +728,30 @@ def main():
         required=True,
         help='Path to model checkpoint'
     )
-    parser.add_argument(
+    
+    # Input data arguments (mutually exclusive)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
         '--csv_path',
         type=str,
-        required=True,
-        help='Path to CSV file for analysis'
+        help='Path to single CSV file with vehicle data'
+    )
+    input_group.add_argument(
+        '--csv_paths',
+        type=str,
+        nargs='+',
+        help='List of paths to multiple CSV files with vehicle data'
+    )
+    input_group.add_argument(
+        '--csv_directory',
+        type=str,
+        help='Directory containing CSV files to load'
+    )
+    parser.add_argument(
+        '--csv_pattern',
+        type=str,
+        default='*_speed_log*.csv',
+        help='Glob pattern for CSV files when using --csv_directory (default: "*_speed_log*.csv")'
     )
     parser.add_argument(
         '--output_dir',
@@ -498,10 +776,16 @@ def main():
     model, normalizer_params, model_config = load_model(args.checkpoint_path, device)
     
     # Load and build sequences
-    from .utils import load_csv_data
-    from .sequence_builder import build_sequences_from_dataframe
+    if args.csv_directory:
+        df = load_csv_files_from_directory(args.csv_directory, pattern=args.csv_pattern, make_tracker_ids_unique=True)
+        print(f"Loaded data from directory: {args.csv_directory}")
+    elif args.csv_paths:
+        df = load_multiple_csv_files(args.csv_paths, make_tracker_ids_unique=True)
+        print(f"Loaded data from {len(args.csv_paths)} CSV files")
+    else:
+        df = load_csv_data(args.csv_path)
+        print(f"Loaded data from: {args.csv_path}")
     
-    df = load_csv_data(args.csv_path)
     sequences, labels, _ = build_sequences_from_dataframe(
         df,
         sequence_length=SEQUENCE_LENGTH,
@@ -510,11 +794,15 @@ def main():
         normalizer_params=normalizer_params
     )
     
+    print(f"Built {len(sequences)} sequences from data")
+    
     # Split into background and test
     n_background = min(SHAP_BACKGROUND_SIZE, len(sequences) // 2)
     background_sequences = sequences[:n_background]
     test_sequences = sequences[n_background:n_background + SHAP_SAMPLE_SIZE]
     test_labels = labels[n_background:n_background + SHAP_SAMPLE_SIZE]
+    
+    print(f"Using {len(background_sequences)} background samples and {len(test_sequences)} test samples")
     
     # Generate report
     generate_explainability_report(
