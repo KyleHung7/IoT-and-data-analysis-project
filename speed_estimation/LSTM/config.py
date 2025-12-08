@@ -76,7 +76,8 @@ EARLY_STOPPING_MIN_DELTA = 0.001
 
 # Optimizer configuration
 OPTIMIZER = "Adam"
-WEIGHT_DECAY = 1e-5
+WEIGHT_DECAY = 1e-4  # Increased from 1e-5 for stronger regularization
+GRADIENT_CLIP_VALUE = 1.0  # Clip gradients to prevent exploding gradients
 
 # Learning rate scheduler
 USE_SCHEDULER = True
@@ -88,6 +89,7 @@ SCHEDULER_FACTOR = 0.5
 TRAIN_VAL_SPLIT = 0.8
 SPLIT_BY_DATE = True  # Split by date instead of random
 SPLIT_BY_SOURCE_FILE = True  # When using multiple CSV files, split by source file to avoid data leakage
+USE_STRATIFIED_SPLIT = True  # Ensure balanced class distribution in train/val splits
 
 # Data normalization
 NORMALIZE_FEATURES = True
@@ -95,6 +97,14 @@ NORMALIZATION_METHOD = "standard"  # Options: "standard", "minmax"
 
 # Evaluation metrics
 METRICS = ["AUC", "F1", "Accuracy", "Precision", "Recall"]
+
+# Anti-overfitting: Data augmentation
+USE_DATA_AUGMENTATION = True  # Add noise to features during training
+AUGMENTATION_NOISE_STD = 0.01  # Standard deviation of Gaussian noise (as fraction of feature std)
+
+# Anti-overfitting: Label smoothing (optional, disabled by default)
+USE_LABEL_SMOOTHING = False  # Set to True to enable label smoothing
+LABEL_SMOOTHING = 0.1  # Smoothing factor (0.0 = no smoothing, 0.1 = soft labels)
 
 # Dilemma Zone configuration
 DZ_SPEED_RANGE = (0, 25)  # m/s

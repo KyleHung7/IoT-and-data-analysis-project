@@ -228,7 +228,8 @@ def plot_training_history_per_vehicle(
     train_losses: List[float] = None,
     val_losses: List[float] = None,
     vehicle_type: str = "all",
-    save_path: Path = None
+    save_path: Path = None,
+    add_note: bool = True
 ):
     """
     Plot training history (loss curves) for visualization.
@@ -238,6 +239,7 @@ def plot_training_history_per_vehicle(
         val_losses: List of validation losses per epoch
         vehicle_type: Vehicle type name (for title)
         save_path: Path to save plot
+        add_note: Whether to add explanatory note if val loss < train loss
     """
     if train_losses is None or val_losses is None:
         print("Warning: Training history not available, skipping plot.")
@@ -248,6 +250,18 @@ def plot_training_history_per_vehicle(
     epochs = range(1, len(train_losses) + 1)
     plt.plot(epochs, train_losses, 'b-', label='Training Loss', linewidth=2, marker='o', markersize=4)
     plt.plot(epochs, val_losses, 'r-', label='Validation Loss', linewidth=2, marker='s', markersize=4)
+    
+    # Check if validation loss is consistently lower than training loss
+    val_lower_than_train = all(v < t for v, t in zip(val_losses, train_losses))
+    if val_lower_than_train and add_note:
+        # Add text note explaining why this might happen
+        note_text = ("Note: Validation loss < Training loss may indicate:\n"
+                     "1) Dropout during training (makes training 'harder')\n"
+                     "2) Small/imbalanced validation set\n"
+                     "3) Validation set easier than training set")
+        plt.text(0.02, 0.98, note_text, transform=plt.gca().transAxes,
+                fontsize=9, verticalalignment='top', bbox=dict(boxstyle='round', 
+                facecolor='wheat', alpha=0.5))
     
     plt.xlabel('Epoch', fontsize=12, fontweight='bold')
     plt.ylabel('Loss (BCE)', fontsize=12, fontweight='bold')
