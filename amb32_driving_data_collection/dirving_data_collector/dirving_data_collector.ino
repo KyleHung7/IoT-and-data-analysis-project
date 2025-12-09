@@ -2,14 +2,13 @@
 #include "DHT.h"
 #include <math.h>
 
-// ======== WiFi & Multimedia / RTSP / MP4 相關 ========
-#include "WiFi.h"
+// ======== Multimedia / MP4 / UVC 相關 ========
 #include "StreamIO.h"
 #include "VideoStream.h"
 #include "AudioStream.h"
 #include "AudioEncoder.h"
 #include "MP4Recording.h"
-#include "RTSP.h"
+#include "UVCD.h"
 
 // ======== 文件系統 (SD) ========
 #include "AmebaFatFS.h"
@@ -19,32 +18,26 @@ File sensorLog;
 bool fsOK = false;
 unsigned long frameIdx = 0;   // sample index
 
-// ================== WiFi 設定 ==================
-char ssid[] = "juke";      // TODO: 改成你的 WiFi SSID
-char pass[] = "asdfghjkl";  // TODO: 改成你的 WiFi 密碼
-int wifiStatus = WL_IDLE_STATUS;
-bool wifiConnected = false;
+// ================== Camera / Audio / MP4 / UVC 設定 ==================
+#define CHANNEL 0    // 用的 video channel
+#define DATA Serial2
 
-// ---- 連線到 Wi-Fi（有重試上限 / timeout）----
-const unsigned long WIFI_TIMEOUT_MS = 20000;  // 最多嘗試 20 秒
-unsigned long wifiStart = millis();
-
-
-// ================== RTSP / Camera / Audio / MP4 設定 ==================
-#define CHANNEL 0    // RTSP & MP4 使用的 video channel
-
-VideoSetting config(VIDEO_FHD, CAM_FPS, VIDEO_H264, 0);
+// 使用 UVC 推薦的預設設定，確保 USB 視訊格式相容
+VideoSetting config(USB_UVCD_STREAM_PRESET);
 
 // 音訊與錄影
 AudioSetting configA(0);   // 8kHz Mono Analog Mic
 Audio audio;
 AAC aac;
 MP4Recording mp4;
-RTSP rtsp;
 
-// StreamIO：Audio -> AAC、Camera+AAC -> RTSP+MP4
+// StreamIO：Audio -> AAC、Camera+AAC -> MP4
 StreamIO audioStreamer(1, 1);   // 1 Input Audio -> 1 Output AAC
-StreamIO avMixStreamer(2, 2);   // 2 Input Video+Audio -> 2 Output RTSP+MP4
+StreamIO avMixStreamer(2, 1);   // 2 Input Video+Audio -> 1 Output MP4
+
+// UVC：Camera -> USB
+UVCD usb_uvcd;
+StreamIO uvcStreamer(1, 1);     // 1 Input Video -> 1 Output USB_CAM
 
 // MP4 錄影控制（自己切段，不用 fileCount）
 const unsigned long SEGMENT_MS = 60000; // 每段 60 秒，可自行調整
@@ -107,24 +100,8 @@ void handleMP4Recording(unsigned long frameTimeMs);
 // ================== setup =====================
 void setup() {
   Serial.begin(115200);
+  DATA.begin(115200);
   delay(1000);
-
-  // ---- 連線到 Wi-Fi ----
-  while (wifiStatus != WL_CONNECTED && (millis() - wifiStart) < WIFI_TIMEOUT_MS) {
-    Serial.print("Attempting to connect to WPA SSID: ");
-    Serial.println(ssid);
-    wifiStatus = WiFi.begin(ssid, pass);
-    delay(2000);  // 每 2 秒重試一次
-  }
-
-  if (wifiStatus == WL_CONNECTED) {
-    wifiConnected = true;
-    Serial.print("WiFi connected, IP = ");
-    Serial.println(WiFi.localIP());
-  } else {
-    wifiConnected = false;
-    Serial.println("WiFi connect failed, continue without WiFi / RTSP");
-  }
 
   // ---- DHT ----
   dht.begin();
@@ -147,9 +124,9 @@ void setup() {
   initFSAndOpenLog();
 
   // 給 Python 用的 header
-  Serial.println("#TYPE,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,mpuTempC,pitch,roll,dhtTempC,dhtHum,lat,lon,speed,accel");
+  DATA.println("#TYPE,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,mpuTempC,pitch,roll,dhtTempC,dhtHum,lat,lon,speed,accel");
 
-  // ========== Camera + Audio + RTSP + MP4 初始化 ==========
+  // ========== Camera + Audio + MP4 + UVC 初始化 ==========
 
   // 1) 設定 Camera video channel
   Camera.configVideoChannel(CHANNEL, config);
@@ -168,37 +145,38 @@ void setup() {
   mp4.configAudio(configA, CODEC_AAC);
   // 不使用 setRecordingDuration / setRecordingFileCount，改成自己用 begin()/end() 切段
 
-  // 5) 設定 RTSP（畫面 + 聲音）
-  if (wifiConnected) {
-    rtsp.configVideo(config);
-    rtsp.configAudio(configA, CODEC_AAC);
-    rtsp.begin();
-    Serial.println("[RTSP] RTSP server started");
-  } else {
-    Serial.println("[RTSP] skip RTSP because WiFi not connected");
-  }
-
-  // 6) 建立 Audio StreamIO：Audio -> AAC
+  // 5) 建立 Audio StreamIO：Audio -> AAC
   audioStreamer.registerInput(audio);
   audioStreamer.registerOutput(aac);
   if (audioStreamer.begin() != 0) {
     Serial.println("[Audio] StreamIO link start failed");
   }
 
-  // 7) 建立 AV Mix StreamIO：Camera + AAC -> RTSP + MP4
+  // 6) 建立 AV Mix StreamIO：Camera + AAC -> MP4
   avMixStreamer.registerInput1(Camera.getStream(CHANNEL)); // Video in
   avMixStreamer.registerInput2(aac);                       // Audio in
-  avMixStreamer.registerOutput1(rtsp);                     // RTSP out
-  avMixStreamer.registerOutput2(mp4);                      // MP4 out
+  avMixStreamer.registerOutput1(mp4);                      // MP4 out
   if (avMixStreamer.begin() != 0) {
     Serial.println("[AV] StreamIO link start failed");
   }
 
-  // 8) 開啟 Camera channel
+  // 7) UVC 設定：Camera -> USB
+  usb_uvcd.configVideo(config);   // 使用同一個 config，確保解析度/格式一致
+
+  uvcStreamer.registerInput(Camera.getStream(CHANNEL));
+  uvcStreamer.registerOutput(usb_uvcd);
+  if (uvcStreamer.begin() != 0) {
+    Serial.println("[UVC] StreamIO link start failed");
+  }
+
+  // 8) 開啟 Camera channel（供 MP4 + UVC 使用）
   Camera.channelBegin(CHANNEL);
 
-  Serial.println("[RTSP] RTSP + MP4 pipeline setup done, waiting for time tag to start recording...");
-  Serial.println("VLC 播放 RTSP 範例：rtsp://<板子IP>/live  (實際路徑以 SDK 範例為準)");
+  // 9) 啟動 USB UVC 裝置
+  usb_uvcd.begin(Camera.getStream(CHANNEL), uvcStreamer.linker, CHANNEL);
+
+  Serial.println("[MP4+UVC] pipeline ready, waiting for time tag to start recording...");
+  Serial.println("連到 PC 後會被當作 USB Camera 使用 (UVC)");
 }
 
 // ================== loop ======================
@@ -225,23 +203,23 @@ void loop() {
 
   // ====== Serial CSV for Python ======
   if (okMPU || okDHT || gpsHasFix) {
-    Serial.print("DATA,");
-    Serial.print(ax_g, 4);      Serial.print(",");
-    Serial.print(ay_g, 4);      Serial.print(",");
-    Serial.print(az_g, 4);      Serial.print(",");
-    Serial.print(gx_dps, 4);    Serial.print(",");
-    Serial.print(gy_dps, 4);    Serial.print(",");
-    Serial.print(gz_dps, 4);    Serial.print(",");
-    Serial.print(mpuTempC, 2);  Serial.print(",");
-    Serial.print(pitch_deg, 2); Serial.print(",");
-    Serial.print(roll_deg, 2);  Serial.print(",");
-    Serial.print(dhtTempC, 2);  Serial.print(",");
-    Serial.print(dhtHum, 2);    Serial.print(",");
-    Serial.print(gpsLatDec, 6); Serial.print(",");
-    Serial.print(gpsLonDec, 6); Serial.print(",");
-    Serial.print(gpsSpeed_mps, 3);  Serial.print(",");
-    Serial.print(gpsAccel_mps2, 3);
-    Serial.println();
+    DATA.print("DATA,");
+    DATA.print(ax_g, 4);      DATA.print(",");
+    DATA.print(ay_g, 4);      DATA.print(",");
+    DATA.print(az_g, 4);      DATA.print(",");
+    DATA.print(gx_dps, 4);    DATA.print(",");
+    DATA.print(gy_dps, 4);    DATA.print(",");
+    DATA.print(gz_dps, 4);    DATA.print(",");
+    DATA.print(mpuTempC, 2);  DATA.print(",");
+    DATA.print(pitch_deg, 2); DATA.print(",");
+    DATA.print(roll_deg, 2);  DATA.print(",");
+    DATA.print(dhtTempC, 2);  DATA.print(",");
+    DATA.print(dhtHum, 2);    DATA.print(",");
+    DATA.print(gpsLatDec, 6); DATA.print(",");
+    DATA.print(gpsLonDec, 6); DATA.print(",");
+    DATA.print(gpsSpeed_mps, 3);  DATA.print(",");
+    DATA.print(gpsAccel_mps2, 3);
+    DATA.println();
   }
 
   // ====== 寫一筆 JSON 到 SD (使用這個 frame 的 t_ms) ======
@@ -254,25 +232,43 @@ void loop() {
   delay(33);
 }
 
-// ================== 檔案系統初始化 ==================
+// ================== 檔案系統初始化（append 到檔案尾端） ==================
 void initFSAndOpenLog() {
   if (!fs.begin()) {
-    Serial.println("[FS] 初始化失敗，請檢查 SD 卡");
+    DATA.println("[FS] 初始化失敗，請檢查 SD 卡");
     fsOK = false;
     return;
   }
 
   String path = String(fs.getRootPath()) + "sensor_log.jsonl";
+
+  // 先檢查檔案是否已存在
+  bool existed = fs.exists(path);
+
   sensorLog = fs.open(path);
   if (!sensorLog) {
-    Serial.println("[FS] 開啟 log 檔失敗");
+    DATA.println("[FS] 開啟 log 檔失敗");
     fsOK = false;
     return;
   }
 
+  // 如果檔案已存在，就把寫入指標移到檔案末端，實現「從尾端繼續寫」
+  if (existed) {
+    uint32_t sz = sensorLog.size();
+    if (sz > 0) {
+      sensorLog.seek(sz);
+      DATA.print("[FS] append to existing log, size = ");
+      DATA.println(sz);
+    } else {
+      DATA.println("[FS] existing log is empty, start from beginning");
+    }
+  } else {
+    DATA.println("[FS] log not exist, create new one");
+  }
+
   fsOK = true;
-  Serial.print("[FS] log 檔: ");
-  Serial.println(path);
+  DATA.print("[FS] log 檔: ");
+  DATA.println(path);
 }
 
 // ================== JSON 寫檔 ==================
@@ -351,15 +347,15 @@ void handleMP4Recording(unsigned long frameTimeMs) {
     recording = true;
     recordingStartMs = frameTimeMs;
 
-    Serial.print("[MP4] start recording: ");
-    Serial.println(base);
+    DATA.print("[MP4] start recording: ");
+    DATA.println(base);
   }
   // 2) 已在錄影 → 達到段落時間就結束，下一圈 loop 再開新檔
   else {
     if (frameTimeMs - recordingStartMs >= SEGMENT_MS) {
       mp4.end();
       recording = false;
-      Serial.println("[MP4] segment finished, will start new file with new time tag on next frame");
+      DATA.println("[MP4] segment finished, will start new file with new time tag on next frame");
     }
   }
 }
