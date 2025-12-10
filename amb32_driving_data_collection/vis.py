@@ -9,7 +9,7 @@ from matplotlib.animation import FuncAnimation
 from flask import Flask, jsonify, render_template_string
 
 # ========= 串口設定 =========
-SERIAL_PORT = "COM7"
+SERIAL_PORT = "COM5"
 BAUD_RATE = 115200
 
 # ========= 資料緩衝區設定 =========

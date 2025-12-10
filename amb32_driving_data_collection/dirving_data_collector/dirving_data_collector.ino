@@ -2,13 +2,12 @@
 #include "DHT.h"
 #include <math.h>
 
-// ======== Multimedia / MP4 / UVC 相關 ========
+// ======== Multimedia / MP4 相關 ========
 #include "StreamIO.h"
 #include "VideoStream.h"
 #include "AudioStream.h"
 #include "AudioEncoder.h"
 #include "MP4Recording.h"
-#include "UVCD.h"
 
 // ======== 文件系統 (SD) ========
 #include "AmebaFatFS.h"
@@ -18,12 +17,10 @@ File sensorLog;
 bool fsOK = false;
 unsigned long frameIdx = 0;   // sample index
 
-// ================== Camera / Audio / MP4 / UVC 設定 ==================
+// ================== Camera / Audio / MP4 設定 ==================
 #define CHANNEL 0    // 用的 video channel
-#define DATA Serial2
 
-// 使用 UVC 推薦的預設設定，確保 USB 視訊格式相容
-VideoSetting config(USB_UVCD_STREAM_PRESET);
+VideoSetting config(VIDEO_FHD, CAM_FPS, VIDEO_H264, 0);
 
 // 音訊與錄影
 AudioSetting configA(0);   // 8kHz Mono Analog Mic
@@ -34,10 +31,6 @@ MP4Recording mp4;
 // StreamIO：Audio -> AAC、Camera+AAC -> MP4
 StreamIO audioStreamer(1, 1);   // 1 Input Audio -> 1 Output AAC
 StreamIO avMixStreamer(2, 1);   // 2 Input Video+Audio -> 1 Output MP4
-
-// UVC：Camera -> USB
-UVCD usb_uvcd;
-StreamIO uvcStreamer(1, 1);     // 1 Input Video -> 1 Output USB_CAM
 
 // MP4 錄影控制（自己切段，不用 fileCount）
 const unsigned long SEGMENT_MS = 60000; // 每段 60 秒，可自行調整
@@ -100,7 +93,6 @@ void handleMP4Recording(unsigned long frameTimeMs);
 // ================== setup =====================
 void setup() {
   Serial.begin(115200);
-  DATA.begin(115200);
   delay(1000);
 
   // ---- DHT ----
@@ -124,9 +116,9 @@ void setup() {
   initFSAndOpenLog();
 
   // 給 Python 用的 header
-  DATA.println("#TYPE,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,mpuTempC,pitch,roll,dhtTempC,dhtHum,lat,lon,speed,accel");
+  Serial.println("#TYPE,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,mpuTempC,pitch,roll,dhtTempC,dhtHum,lat,lon,speed,accel");
 
-  // ========== Camera + Audio + MP4 + UVC 初始化 ==========
+  // ========== Camera + Audio + MP4 初始化 ==========
 
   // 1) 設定 Camera video channel
   Camera.configVideoChannel(CHANNEL, config);
@@ -160,23 +152,10 @@ void setup() {
     Serial.println("[AV] StreamIO link start failed");
   }
 
-  // 7) UVC 設定：Camera -> USB
-  usb_uvcd.configVideo(config);   // 使用同一個 config，確保解析度/格式一致
-
-  uvcStreamer.registerInput(Camera.getStream(CHANNEL));
-  uvcStreamer.registerOutput(usb_uvcd);
-  if (uvcStreamer.begin() != 0) {
-    Serial.println("[UVC] StreamIO link start failed");
-  }
-
-  // 8) 開啟 Camera channel（供 MP4 + UVC 使用）
+  // 7) 開啟 Camera channel
   Camera.channelBegin(CHANNEL);
 
-  // 9) 啟動 USB UVC 裝置
-  usb_uvcd.begin(Camera.getStream(CHANNEL), uvcStreamer.linker, CHANNEL);
-
-  Serial.println("[MP4+UVC] pipeline ready, waiting for time tag to start recording...");
-  Serial.println("連到 PC 後會被當作 USB Camera 使用 (UVC)");
+  Serial.println("[MP4] pipeline ready, waiting for time tag to start recording...");
 }
 
 // ================== loop ======================
@@ -203,23 +182,23 @@ void loop() {
 
   // ====== Serial CSV for Python ======
   if (okMPU || okDHT || gpsHasFix) {
-    DATA.print("DATA,");
-    DATA.print(ax_g, 4);      DATA.print(",");
-    DATA.print(ay_g, 4);      DATA.print(",");
-    DATA.print(az_g, 4);      DATA.print(",");
-    DATA.print(gx_dps, 4);    DATA.print(",");
-    DATA.print(gy_dps, 4);    DATA.print(",");
-    DATA.print(gz_dps, 4);    DATA.print(",");
-    DATA.print(mpuTempC, 2);  DATA.print(",");
-    DATA.print(pitch_deg, 2); DATA.print(",");
-    DATA.print(roll_deg, 2);  DATA.print(",");
-    DATA.print(dhtTempC, 2);  DATA.print(",");
-    DATA.print(dhtHum, 2);    DATA.print(",");
-    DATA.print(gpsLatDec, 6); DATA.print(",");
-    DATA.print(gpsLonDec, 6); DATA.print(",");
-    DATA.print(gpsSpeed_mps, 3);  DATA.print(",");
-    DATA.print(gpsAccel_mps2, 3);
-    DATA.println();
+    Serial.print("DATA,");
+    Serial.print(ax_g, 4);      Serial.print(",");
+    Serial.print(ay_g, 4);      Serial.print(",");
+    Serial.print(az_g, 4);      Serial.print(",");
+    Serial.print(gx_dps, 4);    Serial.print(",");
+    Serial.print(gy_dps, 4);    Serial.print(",");
+    Serial.print(gz_dps, 4);    Serial.print(",");
+    Serial.print(mpuTempC, 2);  Serial.print(",");
+    Serial.print(pitch_deg, 2); Serial.print(",");
+    Serial.print(roll_deg, 2);  Serial.print(",");
+    Serial.print(dhtTempC, 2);  Serial.print(",");
+    Serial.print(dhtHum, 2);    Serial.print(",");
+    Serial.print(gpsLatDec, 6); Serial.print(",");
+    Serial.print(gpsLonDec, 6); Serial.print(",");
+    Serial.print(gpsSpeed_mps, 3);  Serial.print(",");
+    Serial.print(gpsAccel_mps2, 3);
+    Serial.println();
   }
 
   // ====== 寫一筆 JSON 到 SD (使用這個 frame 的 t_ms) ======
@@ -232,10 +211,10 @@ void loop() {
   delay(33);
 }
 
-// ================== 檔案系統初始化（append 到檔案尾端） ==================
+// ================== 檔案系統初始化（改成 append 到檔案尾端） ==================
 void initFSAndOpenLog() {
   if (!fs.begin()) {
-    DATA.println("[FS] 初始化失敗，請檢查 SD 卡");
+    Serial.println("[FS] 初始化失敗，請檢查 SD 卡");
     fsOK = false;
     return;
   }
@@ -247,7 +226,7 @@ void initFSAndOpenLog() {
 
   sensorLog = fs.open(path);
   if (!sensorLog) {
-    DATA.println("[FS] 開啟 log 檔失敗");
+    Serial.println("[FS] 開啟 log 檔失敗");
     fsOK = false;
     return;
   }
@@ -257,18 +236,18 @@ void initFSAndOpenLog() {
     uint32_t sz = sensorLog.size();
     if (sz > 0) {
       sensorLog.seek(sz);
-      DATA.print("[FS] append to existing log, size = ");
-      DATA.println(sz);
+      Serial.print("[FS] append to existing log, size = ");
+      Serial.println(sz);
     } else {
-      DATA.println("[FS] existing log is empty, start from beginning");
+      Serial.println("[FS] existing log is empty, start from beginning");
     }
   } else {
-    DATA.println("[FS] log not exist, create new one");
+    Serial.println("[FS] log not exist, create new one");
   }
 
   fsOK = true;
-  DATA.print("[FS] log 檔: ");
-  DATA.println(path);
+  Serial.print("[FS] log 檔: ");
+  Serial.println(path);
 }
 
 // ================== JSON 寫檔 ==================
@@ -347,15 +326,15 @@ void handleMP4Recording(unsigned long frameTimeMs) {
     recording = true;
     recordingStartMs = frameTimeMs;
 
-    DATA.print("[MP4] start recording: ");
-    DATA.println(base);
+    Serial.print("[MP4] start recording: ");
+    Serial.println(base);
   }
   // 2) 已在錄影 → 達到段落時間就結束，下一圈 loop 再開新檔
   else {
     if (frameTimeMs - recordingStartMs >= SEGMENT_MS) {
       mp4.end();
       recording = false;
-      DATA.println("[MP4] segment finished, will start new file with new time tag on next frame");
+      Serial.println("[MP4] segment finished, will start new file with new time tag on next frame");
     }
   }
 }
