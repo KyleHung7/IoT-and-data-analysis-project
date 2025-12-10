@@ -2,14 +2,12 @@
 #include "DHT.h"
 #include <math.h>
 
-// ======== WiFi & Multimedia / RTSP / MP4 相關 ========
-#include "WiFi.h"
+// ======== Multimedia / MP4 相關 ========
 #include "StreamIO.h"
 #include "VideoStream.h"
 #include "AudioStream.h"
 #include "AudioEncoder.h"
 #include "MP4Recording.h"
-#include "RTSP.h"
 
 // ======== 文件系統 (SD) ========
 #include "AmebaFatFS.h"
@@ -19,19 +17,8 @@ File sensorLog;
 bool fsOK = false;
 unsigned long frameIdx = 0;   // sample index
 
-// ================== WiFi 設定 ==================
-char ssid[] = "juke";      // TODO: 改成你的 WiFi SSID
-char pass[] = "asdfghjkl";  // TODO: 改成你的 WiFi 密碼
-int wifiStatus = WL_IDLE_STATUS;
-bool wifiConnected = false;
-
-// ---- 連線到 Wi-Fi（有重試上限 / timeout）----
-const unsigned long WIFI_TIMEOUT_MS = 20000;  // 最多嘗試 20 秒
-unsigned long wifiStart = millis();
-
-
-// ================== RTSP / Camera / Audio / MP4 設定 ==================
-#define CHANNEL 0    // RTSP & MP4 使用的 video channel
+// ================== Camera / Audio / MP4 設定 ==================
+#define CHANNEL 0    // 用的 video channel
 
 VideoSetting config(VIDEO_FHD, CAM_FPS, VIDEO_H264, 0);
 
@@ -40,11 +27,10 @@ AudioSetting configA(0);   // 8kHz Mono Analog Mic
 Audio audio;
 AAC aac;
 MP4Recording mp4;
-RTSP rtsp;
 
-// StreamIO：Audio -> AAC、Camera+AAC -> RTSP+MP4
+// StreamIO：Audio -> AAC、Camera+AAC -> MP4
 StreamIO audioStreamer(1, 1);   // 1 Input Audio -> 1 Output AAC
-StreamIO avMixStreamer(2, 2);   // 2 Input Video+Audio -> 2 Output RTSP+MP4
+StreamIO avMixStreamer(2, 1);   // 2 Input Video+Audio -> 1 Output MP4
 
 // MP4 錄影控制（自己切段，不用 fileCount）
 const unsigned long SEGMENT_MS = 60000; // 每段 60 秒，可自行調整
@@ -109,23 +95,6 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  // ---- 連線到 Wi-Fi ----
-  while (wifiStatus != WL_CONNECTED && (millis() - wifiStart) < WIFI_TIMEOUT_MS) {
-    Serial.print("Attempting to connect to WPA SSID: ");
-    Serial.println(ssid);
-    wifiStatus = WiFi.begin(ssid, pass);
-    delay(2000);  // 每 2 秒重試一次
-  }
-
-  if (wifiStatus == WL_CONNECTED) {
-    wifiConnected = true;
-    Serial.print("WiFi connected, IP = ");
-    Serial.println(WiFi.localIP());
-  } else {
-    wifiConnected = false;
-    Serial.println("WiFi connect failed, continue without WiFi / RTSP");
-  }
-
   // ---- DHT ----
   dht.begin();
   delay(2000);  // DHT 上電穩定時間
@@ -149,7 +118,7 @@ void setup() {
   // 給 Python 用的 header
   Serial.println("#TYPE,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,mpuTempC,pitch,roll,dhtTempC,dhtHum,lat,lon,speed,accel");
 
-  // ========== Camera + Audio + RTSP + MP4 初始化 ==========
+  // ========== Camera + Audio + MP4 初始化 ==========
 
   // 1) 設定 Camera video channel
   Camera.configVideoChannel(CHANNEL, config);
@@ -168,37 +137,25 @@ void setup() {
   mp4.configAudio(configA, CODEC_AAC);
   // 不使用 setRecordingDuration / setRecordingFileCount，改成自己用 begin()/end() 切段
 
-  // 5) 設定 RTSP（畫面 + 聲音）
-  if (wifiConnected) {
-    rtsp.configVideo(config);
-    rtsp.configAudio(configA, CODEC_AAC);
-    rtsp.begin();
-    Serial.println("[RTSP] RTSP server started");
-  } else {
-    Serial.println("[RTSP] skip RTSP because WiFi not connected");
-  }
-
-  // 6) 建立 Audio StreamIO：Audio -> AAC
+  // 5) 建立 Audio StreamIO：Audio -> AAC
   audioStreamer.registerInput(audio);
   audioStreamer.registerOutput(aac);
   if (audioStreamer.begin() != 0) {
     Serial.println("[Audio] StreamIO link start failed");
   }
 
-  // 7) 建立 AV Mix StreamIO：Camera + AAC -> RTSP + MP4
+  // 6) 建立 AV Mix StreamIO：Camera + AAC -> MP4
   avMixStreamer.registerInput1(Camera.getStream(CHANNEL)); // Video in
   avMixStreamer.registerInput2(aac);                       // Audio in
-  avMixStreamer.registerOutput1(rtsp);                     // RTSP out
-  avMixStreamer.registerOutput2(mp4);                      // MP4 out
+  avMixStreamer.registerOutput1(mp4);                      // MP4 out
   if (avMixStreamer.begin() != 0) {
     Serial.println("[AV] StreamIO link start failed");
   }
 
-  // 8) 開啟 Camera channel
+  // 7) 開啟 Camera channel
   Camera.channelBegin(CHANNEL);
 
-  Serial.println("[RTSP] RTSP + MP4 pipeline setup done, waiting for time tag to start recording...");
-  Serial.println("VLC 播放 RTSP 範例：rtsp://<板子IP>/live  (實際路徑以 SDK 範例為準)");
+  Serial.println("[MP4] pipeline ready, waiting for time tag to start recording...");
 }
 
 // ================== loop ======================
@@ -254,7 +211,7 @@ void loop() {
   delay(33);
 }
 
-// ================== 檔案系統初始化 ==================
+// ================== 檔案系統初始化（改成 append 到檔案尾端） ==================
 void initFSAndOpenLog() {
   if (!fs.begin()) {
     Serial.println("[FS] 初始化失敗，請檢查 SD 卡");
@@ -263,11 +220,29 @@ void initFSAndOpenLog() {
   }
 
   String path = String(fs.getRootPath()) + "sensor_log.jsonl";
+
+  // 先檢查檔案是否已存在
+  bool existed = fs.exists(path);
+
   sensorLog = fs.open(path);
   if (!sensorLog) {
     Serial.println("[FS] 開啟 log 檔失敗");
     fsOK = false;
     return;
+  }
+
+  // 如果檔案已存在，就把寫入指標移到檔案末端，實現「從尾端繼續寫」
+  if (existed) {
+    uint32_t sz = sensorLog.size();
+    if (sz > 0) {
+      sensorLog.seek(sz);
+      Serial.print("[FS] append to existing log, size = ");
+      Serial.println(sz);
+    } else {
+      Serial.println("[FS] existing log is empty, start from beginning");
+    }
+  } else {
+    Serial.println("[FS] log not exist, create new one");
   }
 
   fsOK = true;
