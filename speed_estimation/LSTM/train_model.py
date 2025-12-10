@@ -331,6 +331,17 @@ def train(
     else:
         df = load_csv_data(csv_path)
     
+    # Convert string labels to integers in the original dataframe if needed
+    if 'yellow_light_decision' in df.columns:
+        if df['yellow_light_decision'].dtype == 'object':
+            # Convert string labels to integers: 'go' -> 0, 'stop' -> 1, empty -> NaN
+            df = df.copy()
+            df['yellow_light_decision'] = df['yellow_light_decision'].map({
+                'go': 0, 'GO': 0, 'Go': 0,
+                'stop': 1, 'STOP': 1, 'Stop': 1,
+                '': None, None: None
+            })
+    
     # First, identify vehicles with valid labels
     df_valid_labels = filter_valid_labels(df)
     vehicles_with_labels = df_valid_labels['tracker_id'].unique()
@@ -354,7 +365,13 @@ def train(
                 labels = vehicle_data['yellow_light_decision'].dropna()
                 if len(labels) > 0:
                     # Use most common label for this vehicle
-                    vehicle_labels[tracker_id] = int(labels.mode().iloc[0] if len(labels.mode()) > 0 else labels.iloc[-1])
+                    # Labels should now be integers (0 or 1) after conversion above
+                    label_val = labels.mode().iloc[0] if len(labels.mode()) > 0 else labels.iloc[-1]
+                    # Handle both string and numeric formats (defensive)
+                    if isinstance(label_val, str):
+                        vehicle_labels[tracker_id] = 1 if label_val.lower() == 'stop' else 0
+                    else:
+                        vehicle_labels[tracker_id] = int(label_val)
         
         # Separate vehicles by class
         stop_vehicles = [v for v, label in vehicle_labels.items() if label == 1]
