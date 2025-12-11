@@ -9,7 +9,7 @@ from matplotlib.animation import FuncAnimation
 from flask import Flask, jsonify, render_template_string
 
 # ========= 串口設定 =========
-SERIAL_PORT = "COM5"
+SERIAL_PORT = "COM4"
 BAUD_RATE = 115200
 
 # ========= 資料緩衝區設定 =========
@@ -253,7 +253,7 @@ def parse_line(line):
     DATA,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,mpuTempC,pitch,roll,dhtTempC,dhtHum,lat,lon,speed,accel
     """
     line = line.strip()
-    print(line)
+    # print(line)
     if not line.startswith("DATA,"):
         return None
 
