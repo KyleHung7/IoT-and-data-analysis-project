@@ -27,6 +27,8 @@ from .config import (
     PLOT_STYLE
 )
 from .model_architecture import DilemmaZoneModel
+from .utils import load_csv_data, load_multiple_csv_files, load_csv_files_from_directory
+from .sequence_builder import build_sequences_from_dataframe
 
 warnings.filterwarnings('ignore')
 
@@ -101,24 +103,180 @@ def create_synthetic_sequence(
     return sequence
 
 
+def find_matching_real_sequences(
+    real_sequences: List[np.ndarray],
+    sequence_metadata: List[Dict],  # List of dicts with 'speed', 'distance', 'class_id' for each sequence
+    target_speed: float,
+    target_distance: float,
+    target_class_id: int,
+    speed_tolerance: float = 2.0,  # m/s tolerance
+    distance_tolerance: float = 5.0,  # meters tolerance
+    max_matches: int = 5
+) -> List[np.ndarray]:
+    """
+    Find real sequences that match the target speed and distance.
+    
+    Args:
+        real_sequences: List of real sequences from training data
+        sequence_metadata: Metadata for each sequence (speed, distance, class_id)
+        target_speed: Target speed in m/s
+        target_distance: Target distance in meters
+        target_class_id: Target vehicle class ID
+        speed_tolerance: Speed matching tolerance
+        distance_tolerance: Distance matching tolerance
+        max_matches: Maximum number of matching sequences to return
+        
+    Returns:
+        List of matching sequences
+    """
+    matches = []
+    
+    for seq, metadata in zip(real_sequences, sequence_metadata):
+        # Check if class_id matches
+        if metadata.get('class_id') != target_class_id:
+            continue
+        
+        # Check if speed and distance are within tolerance
+        speed_diff = abs(metadata.get('speed', 0) - target_speed)
+        distance_diff = abs(metadata.get('distance', 0) - target_distance)
+        
+        if speed_diff <= speed_tolerance and distance_diff <= distance_tolerance:
+            # Calculate combined distance metric (weighted)
+            combined_distance = np.sqrt(
+                (speed_diff / speed_tolerance) ** 2 + 
+                (distance_diff / distance_tolerance) ** 2
+            )
+            matches.append((combined_distance, seq))
+    
+    # Sort by distance and return best matches
+    matches.sort(key=lambda x: x[0])
+    return [seq for _, seq in matches[:max_matches]]
+
+
+def extract_sequence_metadata(sequences: List[np.ndarray], df: 'pd.DataFrame' = None) -> List[Dict]:
+    """
+    Extract metadata (speed, distance, class_id) from sequences.
+    Uses the last frame of each sequence to get final speed/distance.
+    
+    Args:
+        sequences: List of sequences (normalized)
+        df: Original dataframe with vehicle data (optional, for fallback)
+        
+    Returns:
+        List of metadata dicts
+    """
+    import pandas as pd
+    from .config import NORMALIZATION_METHOD
+    
+    metadata = []
+    
+    # Extract from sequences directly (they're already normalized, but we can use them)
+    # The sequences are normalized, so we need to denormalize or use the original df
+    # For now, let's use the dataframe if available, otherwise extract from sequences
+    
+    if df is not None:
+        # Use dataframe to get actual values
+        vehicles_with_decisions = df[df['yellow_light_decision'].notna()]['tracker_id'].unique()
+        
+        for idx, tracker_id in enumerate(vehicles_with_decisions):
+            if idx >= len(sequences):
+                break
+                
+            vehicle_data = df[df['tracker_id'] == tracker_id].sort_values('frame_index')
+            
+            # Get the last frame before yellow (this is what the sequence represents)
+            # Find yellow onset - check multiple column formats
+            yellow_frames = None
+            if 'yellow_light' in vehicle_data.columns:
+                yellow_frames = vehicle_data[vehicle_data['yellow_light'] == True]
+            elif 'traffic_light_status' in vehicle_data.columns:
+                yellow_frames = vehicle_data[vehicle_data['traffic_light_status'] == 'YELLOW']
+            
+            if yellow_frames is not None and len(yellow_frames) > 0:
+                yellow_onset_frame = yellow_frames['frame_index'].min()
+                before_yellow = vehicle_data[vehicle_data['frame_index'] < yellow_onset_frame]
+            else:
+                # No yellow found, use last frame before decision
+                decision_frames = vehicle_data[vehicle_data['yellow_light_decision'].notna()]
+                if len(decision_frames) > 0:
+                    decision_frame = decision_frames['frame_index'].min()
+                    before_yellow = vehicle_data[vehicle_data['frame_index'] < decision_frame]
+                else:
+                    before_yellow = vehicle_data
+            
+            if len(before_yellow) > 0:
+                last_frame = before_yellow.iloc[-1]
+                speed_val = last_frame.get('speed_ms', 0)
+                distance_val = last_frame.get('distance_to_stop_line', 0)
+                class_id_val = int(last_frame.get('class_id', 2))
+                
+                # Handle NaN values
+                if pd.isna(speed_val):
+                    speed_val = 0.0
+                if pd.isna(distance_val):
+                    distance_val = 0.0
+                if pd.isna(class_id_val):
+                    class_id_val = 2
+                
+                metadata.append({
+                    'speed': float(speed_val),
+                    'distance': float(distance_val),
+                    'class_id': int(class_id_val)
+                })
+            else:
+                # Fallback: use sequence features (but they're normalized)
+                seq = sequences[idx]
+                if len(seq) > 0:
+                    last_frame_features = seq[-1]
+                    # These are normalized values, but we'll use them as approximate
+                    metadata.append({
+                        'speed': float(last_frame_features[0]),
+                        'distance': float(last_frame_features[1]),
+                        'class_id': int(last_frame_features[5])
+                    })
+                else:
+                    metadata.append({'speed': 0, 'distance': 0, 'class_id': 2})
+    else:
+        # No dataframe, extract from sequences directly (normalized values)
+        for seq in sequences:
+            if len(seq) > 0:
+                last_frame_features = seq[-1]
+                metadata.append({
+                    'speed': float(last_frame_features[0]),  # Normalized, but relative values work
+                    'distance': float(last_frame_features[1]),
+                    'class_id': int(last_frame_features[5])
+                })
+            else:
+                metadata.append({'speed': 0, 'distance': 0, 'class_id': 2})
+    
+    return metadata
+
+
 def generate_dilemma_zone_grid(
     model: DilemmaZoneModel,
     speed_range: Tuple[float, float] = DZ_SPEED_RANGE,
     distance_range: Tuple[float, float] = DZ_DISTANCE_RANGE,
     grid_resolution: int = DZ_GRID_RESOLUTION,
     vehicle_class_id: int = 2,
-    device: torch.device = None
+    device: torch.device = None,
+    real_sequences: Optional[List[np.ndarray]] = None,
+    sequence_metadata: Optional[List[Dict]] = None,
+    use_real_data: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Generate dilemma zone grid by predicting P(stop) for each grid point.
+    Uses real sequences from training data if available, otherwise falls back to synthetic.
     
     Args:
         model: Trained model
         speed_range: (min, max) speed range in m/s
         distance_range: (min, max) distance range in meters
         grid_resolution: Number of grid points per dimension
-        vehicle_class_id: Vehicle class ID for synthetic sequences
+        vehicle_class_id: Vehicle class ID for sequences
         device: Device to run on
+        real_sequences: List of real sequences from training data
+        sequence_metadata: Metadata for each sequence (speed, distance, class_id)
+        use_real_data: Whether to use real sequences (True) or synthetic (False)
         
     Returns:
         Tuple of (speed_grid, distance_grid, probability_grid)
@@ -133,25 +291,58 @@ def generate_dilemma_zone_grid(
     speed_grid, distance_grid = np.meshgrid(speed_values, distance_values)
     probability_grid = np.zeros_like(speed_grid)
     
-    print(f"Generating dilemma zone grid ({grid_resolution}x{grid_resolution})...")
+    use_real = use_real_data and real_sequences is not None and sequence_metadata is not None
+    if use_real:
+        print(f"Generating dilemma zone grid using REAL sequences from training data ({grid_resolution}x{grid_resolution})...")
+    else:
+        print(f"Generating dilemma zone grid using SYNTHETIC sequences ({grid_resolution}x{grid_resolution})...")
     
     model.eval()
     with torch.no_grad():
         for i in range(grid_resolution):
+            if (i + 1) % 10 == 0:
+                print(f"  Progress: {i+1}/{grid_resolution} rows completed...")
+            
             for j in range(grid_resolution):
                 speed = speed_grid[i, j]
                 distance = distance_grid[i, j]
                 
-                # Create synthetic sequence
-                sequence = create_synthetic_sequence(
-                    speed_ms=speed,
-                    distance_to_stop_line=distance,
-                    class_id=vehicle_class_id
-                )
+                if use_real:
+                    # Find matching real sequences
+                    matching_sequences = find_matching_real_sequences(
+                        real_sequences, sequence_metadata,
+                        target_speed=speed,
+                        target_distance=distance,
+                        target_class_id=vehicle_class_id
+                    )
+                    
+                    if len(matching_sequences) > 0:
+                        # Use average prediction from matching sequences
+                        probs = []
+                        for seq in matching_sequences:
+                            sequence_tensor = torch.FloatTensor(seq).unsqueeze(0).to(device)
+                            prob = model(sequence_tensor).cpu().item()
+                            probs.append(prob)
+                        prob = np.mean(probs)  # Average probability
+                    else:
+                        # No matching real sequence found, use synthetic as fallback
+                        sequence = create_synthetic_sequence(
+                            speed_ms=speed,
+                            distance_to_stop_line=distance,
+                            class_id=vehicle_class_id
+                        )
+                        sequence_tensor = torch.FloatTensor(sequence).unsqueeze(0).to(device)
+                        prob = model(sequence_tensor).cpu().item()
+                else:
+                    # Use synthetic sequence
+                    sequence = create_synthetic_sequence(
+                        speed_ms=speed,
+                        distance_to_stop_line=distance,
+                        class_id=vehicle_class_id
+                    )
+                    sequence_tensor = torch.FloatTensor(sequence).unsqueeze(0).to(device)
+                    prob = model(sequence_tensor).cpu().item()
                 
-                # Predict
-                sequence_tensor = torch.FloatTensor(sequence).unsqueeze(0).to(device)
-                prob = model(sequence_tensor).cpu().item()
                 probability_grid[i, j] = prob
     
     return speed_grid, distance_grid, probability_grid
@@ -228,7 +419,8 @@ def plot_training_history_per_vehicle(
     train_losses: List[float] = None,
     val_losses: List[float] = None,
     vehicle_type: str = "all",
-    save_path: Path = None
+    save_path: Path = None,
+    add_note: bool = True
 ):
     """
     Plot training history (loss curves) for visualization.
@@ -238,6 +430,7 @@ def plot_training_history_per_vehicle(
         val_losses: List of validation losses per epoch
         vehicle_type: Vehicle type name (for title)
         save_path: Path to save plot
+        add_note: Whether to add explanatory note if val loss < train loss
     """
     if train_losses is None or val_losses is None:
         print("Warning: Training history not available, skipping plot.")
@@ -248,6 +441,18 @@ def plot_training_history_per_vehicle(
     epochs = range(1, len(train_losses) + 1)
     plt.plot(epochs, train_losses, 'b-', label='Training Loss', linewidth=2, marker='o', markersize=4)
     plt.plot(epochs, val_losses, 'r-', label='Validation Loss', linewidth=2, marker='s', markersize=4)
+    
+    # # Check if validation loss is consistently lower than training loss
+    # val_lower_than_train = all(v < t for v, t in zip(val_losses, train_losses))
+    # if val_lower_than_train and add_note:
+    #     # Add text note explaining why this might happen
+    #     note_text = ("Note: Validation loss < Training loss may indicate:\n"
+    #                  "1) Dropout during training (makes training 'harder')\n"
+    #                  "2) Small/imbalanced validation set\n"
+    #                  "3) Validation set easier than training set")
+    #     plt.text(0.02, 0.98, note_text, transform=plt.gca().transAxes,
+    #             fontsize=9, verticalalignment='top', bbox=dict(boxstyle='round', 
+    #             facecolor='wheat', alpha=0.5))
     
     plt.xlabel('Epoch', fontsize=12, fontweight='bold')
     plt.ylabel('Loss (BCE)', fontsize=12, fontweight='bold')
@@ -272,7 +477,10 @@ def generate_dilemma_zones_for_all_vehicle_types(
     output_dir: Path = None,
     device: torch.device = None,
     train_losses: List[float] = None,
-    val_losses: List[float] = None
+    val_losses: List[float] = None,
+    real_sequences: Optional[List[np.ndarray]] = None,
+    sequence_metadata: Optional[List[Dict]] = None,
+    use_real_data: bool = True
 ):
     """
     Generate dilemma zone maps for all vehicle types with optional training history.
@@ -311,7 +519,10 @@ def generate_dilemma_zones_for_all_vehicle_types(
         # Generate grid
         speed_grid, distance_grid, probability_grid = generate_dilemma_zone_grid(
             model, speed_range, distance_range, grid_resolution,
-            vehicle_class_id=class_id, device=device
+            vehicle_class_id=class_id, device=device,
+            real_sequences=real_sequences,
+            sequence_metadata=sequence_metadata,
+            use_real_data=use_real_data
         )
         
         # Plot and save heatmap
@@ -381,6 +592,23 @@ def main():
         metavar=('MIN', 'MAX'),
         help='Distance range in meters (default: 0 60). Example: --distance_range 0 80'
     )
+    parser.add_argument(
+        '--csv_directory',
+        type=str,
+        default=None,
+        help='Directory containing CSV files with training data (for realistic heatmaps)'
+    )
+    parser.add_argument(
+        '--csv_pattern',
+        type=str,
+        default='*_speed_log*.csv',
+        help='Pattern to match CSV files (default: *_speed_log*.csv)'
+    )
+    parser.add_argument(
+        '--use_synthetic',
+        action='store_true',
+        help='Force use of synthetic sequences instead of real data'
+    )
     
     args = parser.parse_args()
     
@@ -392,7 +620,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Load model
-    model, _, _ = load_model(args.checkpoint_path, device)
+    model, normalizer_params, _ = load_model(args.checkpoint_path, device)
     
     # Try to load training history if available
     checkpoint_dir = Path(args.checkpoint_path).parent
@@ -410,6 +638,48 @@ def main():
             if train_losses and val_losses:
                 print(f"Loaded training history: {len(train_losses)} epochs")
     
+    # Load real sequences from training data if CSV directory provided
+    real_sequences = None
+    sequence_metadata = None
+    use_real_data = not args.use_synthetic
+    
+    if use_real_data and args.csv_directory:
+        print(f"\nLoading real sequences from: {args.csv_directory}")
+        try:
+            df = load_csv_files_from_directory(
+                args.csv_directory, 
+                pattern=args.csv_pattern, 
+                make_tracker_ids_unique=True
+            )
+            print(f"Loaded {len(df)} rows from training data")
+            
+            # Build sequences
+            sequences, labels, _ = build_sequences_from_dataframe(
+                df,
+                sequence_length=SEQUENCE_LENGTH,
+                normalize=True,
+                fit_normalizer=False,
+                normalizer_params=normalizer_params
+            )
+            
+            print(f"Built {len(sequences)} real sequences")
+            
+            # Extract metadata for each sequence (before normalization, use original df)
+            sequence_metadata = extract_sequence_metadata(sequences, df)
+            real_sequences = sequences  # These are already normalized, which is correct for model input
+            
+            print(f"Using real sequences for heatmap generation")
+            print(f"  Speed range in data: {min(m['speed'] for m in sequence_metadata):.1f} - {max(m['speed'] for m in sequence_metadata):.1f} m/s")
+            print(f"  Distance range in data: {min(m['distance'] for m in sequence_metadata):.1f} - {max(m['distance'] for m in sequence_metadata):.1f} m")
+            
+        except Exception as e:
+            print(f"Warning: Could not load real sequences: {e}")
+            print("Falling back to synthetic sequences...")
+            use_real_data = False
+    elif use_real_data:
+        print("No CSV directory provided. Using synthetic sequences.")
+        use_real_data = False
+    
     # Generate dilemma zones
     if args.vehicle_type is None or args.vehicle_type == 'all':
         generate_dilemma_zones_for_all_vehicle_types(
@@ -419,7 +689,10 @@ def main():
             output_dir=args.output_dir, 
             device=device,
             train_losses=train_losses, 
-            val_losses=val_losses
+            val_losses=val_losses,
+            real_sequences=real_sequences,
+            sequence_metadata=sequence_metadata,
+            use_real_data=use_real_data
         )
     else:
         # Generate for specific vehicle type
@@ -438,7 +711,10 @@ def main():
             distance_range=distance_range,
             vehicle_class_id=class_id, 
             device=device,
-            grid_resolution=args.grid_resolution
+            grid_resolution=args.grid_resolution,
+            real_sequences=real_sequences,
+            sequence_metadata=sequence_metadata,
+            use_real_data=use_real_data
         )
         
         output_dir = Path(args.output_dir) if args.output_dir else DZ_DIR

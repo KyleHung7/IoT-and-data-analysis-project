@@ -206,7 +206,7 @@ def main():
     Main function to record 5 videos of 2 minutes each.
     """
     webpage_url = "https://tw.live/cam/?id=BOT243"
-    num_videos = 5
+    num_videos = 30
     duration_minutes = 2
     duration_seconds = duration_minutes * 60
     

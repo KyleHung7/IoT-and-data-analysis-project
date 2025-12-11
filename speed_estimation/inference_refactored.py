@@ -615,6 +615,14 @@ def process_video(
     
     # Generate CSV output path if not provided
     if csv_output_path is None:
+        # If processing from recordings directory, output CSVs to logs directory
+        if 'recordings' in str(source_dir):
+            logs_dir = source_dir.parent / 'logs'
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            csv_dir = logs_dir
+        else:
+            csv_dir = source_dir
+        
         # Try to find a unique filename
         counter = 0
         while True:
@@ -623,7 +631,7 @@ def process_video(
             else:
                 csv_filename = f"{source_stem}_speed_log_{counter}.csv"
             
-            csv_path = source_dir / csv_filename
+            csv_path = csv_dir / csv_filename
             if not csv_path.exists():
                 csv_output_path = str(csv_path)
                 break
