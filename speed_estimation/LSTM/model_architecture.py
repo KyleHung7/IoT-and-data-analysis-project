@@ -14,6 +14,7 @@ from .config import (
     LSTM_HIDDEN_SIZE,
     LSTM_NUM_LAYERS,
     LSTM_DROPOUT,
+    FC_DROPOUT,
     CNN_NUM_FILTERS,
     CNN_KERNEL_SIZE,
     CNN_STRIDE,
@@ -168,13 +169,15 @@ class DilemmaZoneModel(nn.Module):
         num_layers: int = LSTM_NUM_LAYERS,
         dropout: float = LSTM_DROPOUT,
         cnn_num_filters: int = CNN_NUM_FILTERS,
-        cnn_kernel_size: int = CNN_KERNEL_SIZE
+        cnn_kernel_size: int = CNN_KERNEL_SIZE,
+        fc_dropout: float = FC_DROPOUT
     ):
         super(DilemmaZoneModel, self).__init__()
         
         self.model_type = model_type.lower()
         self.input_dim = input_dim
         self.sequence_length = sequence_length
+        self.fc_dropout = fc_dropout
         
         # Choose encoder
         if self.model_type == "lstm":
@@ -197,6 +200,7 @@ class DilemmaZoneModel(nn.Module):
         
         # Interpretable linear output layer
         # P(stop) = sigmoid(wᵀz + b)
+        self.dropout = nn.Dropout(self.fc_dropout)
         self.output_layer = nn.Linear(encoder_output_dim, 1)
         
         # Initialize weights
@@ -224,6 +228,9 @@ class DilemmaZoneModel(nn.Module):
         """
         # Encode sequence
         z = self.encoder(x)  # (batch_size, encoder_output_dim)
+        
+        # Apply dropout
+        z = self.dropout(z)
         
         # Linear transformation
         logits = self.output_layer(z)  # (batch_size, 1)

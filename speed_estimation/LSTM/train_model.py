@@ -589,7 +589,6 @@ def train(
                 mode='min',
                 factor=SCHEDULER_FACTOR,
                 patience=SCHEDULER_PATIENCE,
-                verbose=True
             )
         elif SCHEDULER_TYPE == "StepLR":
             scheduler = StepLR(

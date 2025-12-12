@@ -58,8 +58,8 @@ def load_model(checkpoint_path: str, device: torch.device) -> tuple:
     Returns:
         Tuple of (model, normalizer_params, model_config)
     """
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
     # Get model configuration
     model_config = checkpoint.get('model_config', {})
     model_type = model_config.get('model_type', 'lstm')
