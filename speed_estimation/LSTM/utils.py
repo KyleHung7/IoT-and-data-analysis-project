@@ -367,4 +367,3 @@ def get_feature_array(df: pd.DataFrame) -> np.ndarray:
     features = feature_df[FEATURE_COLUMNS].values.astype(np.float32)
     
     return features
-
