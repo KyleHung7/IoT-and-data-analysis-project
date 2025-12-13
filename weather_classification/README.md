@@ -4,6 +4,18 @@
 
 模型檔案為 [weather_mobilenetv2_best.h5](weather_mobilenetv2_best.h5)。
 
+另，使用 [氣象資料開放平台 API](https://opendata.cwa.gov.tw/devManual/datalist) L-003，可藉由經緯度查詢最接近的氣象觀測站的天氣狀況。
+
+## API 取得天氣資訊
+
+```bash
+python3 weather_api.py
+```
+
+使用 `get_weather_condition_api(latitude, longitude, API_KEY)` 以取得觀測站回傳相關資訊，及天氣狀況 label。
+
+使用過去一小時降雨量輔助判斷天氣狀況。
+
 ## 模型架構
 
 使用經過 ImageNet 預訓練的 MobileNetV2 架構作為 backbone，套用自定義的分類頭，輸出 5 個不同的 label 對應的機率。
