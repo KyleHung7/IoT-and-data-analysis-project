@@ -1,6 +1,5 @@
 """
 Configuration file for Dynamic Dilemma Zone Modeling System
-
 Contains all hyperparameters, paths, and model settings.
 """
 
@@ -51,10 +50,10 @@ FEATURE_COLUMNS = [
 FEATURE_DIM = len(FEATURE_COLUMNS)  # 6 features
 
 # Sequence configuration
-SEQUENCE_LENGTH = 12  # Number of frames in sequence (8-15 range, default 12)
+SEQUENCE_LENGTH = 12
 MIN_SEQUENCE_LENGTH = 8
 MAX_SEQUENCE_LENGTH = 15
-FRAMES_BEFORE_YELLOW = SEQUENCE_LENGTH  # Extract last N frames before yellow onset
+FRAMES_BEFORE_YELLOW = SEQUENCE_LENGTH
 
 # Model configuration
 MODEL_TYPE = "LSTM"  # Options: "LSTM" or "CNN"
@@ -63,7 +62,7 @@ LSTM_NUM_LAYERS = 2
 LSTM_DROPOUT = 0.5
 FC_DROPOUT = 0.5
 
-# CNN configuration (alternative to LSTM)
+# CNN alternative options
 CNN_NUM_FILTERS = 64
 CNN_KERNEL_SIZE = 3
 CNN_STRIDE = 1
@@ -75,36 +74,45 @@ NUM_EPOCHS = 100
 EARLY_STOPPING_PATIENCE = 10
 EARLY_STOPPING_MIN_DELTA = 0.001
 
+# ---- Added to match train_model.py ----
+GRADIENT_CLIP_VALUE = 1.0  # Prevent exploding gradients
+USE_STRATIFIED_SPLIT = False
+USE_DATA_AUGMENTATION = False
+AUGMENTATION_NOISE_STD = 0.05
+USE_LABEL_SMOOTHING = False
+LABEL_SMOOTHING = 0.1
+# ---------------------------------------
+
 # Optimizer configuration
 OPTIMIZER = "Adam"
 WEIGHT_DECAY = 1e-4
 
 # Learning rate scheduler
 USE_SCHEDULER = True
-SCHEDULER_TYPE = "ReduceLROnPlateau"  # Options: "ReduceLROnPlateau", "StepLR"
+SCHEDULER_TYPE = "ReduceLROnPlateau"
 SCHEDULER_PATIENCE = 5
 SCHEDULER_FACTOR = 0.5
 
 # Train/Validation split
 TRAIN_VAL_SPLIT = 0.8
-SPLIT_BY_DATE = True  # Split by date instead of random
-SPLIT_BY_SOURCE_FILE = True  # When using multiple CSV files, split by source file to avoid data leakage
+SPLIT_BY_DATE = True
+SPLIT_BY_SOURCE_FILE = True
 
 # Data normalization
 NORMALIZE_FEATURES = True
-NORMALIZATION_METHOD = "standard"  # Options: "standard", "minmax"
+NORMALIZATION_METHOD = "standard"
 
 # Evaluation metrics
 METRICS = ["AUC", "F1", "Accuracy", "Precision", "Recall"]
 
 # Dilemma Zone configuration
-DZ_SPEED_RANGE = (0, 25)  # m/s
-DZ_DISTANCE_RANGE = (0, 60)  # meters
-DZ_GRID_RESOLUTION = 50  # Number of grid points per dimension
-DZ_CONTOUR_LEVELS = [0.3, 0.5, 0.7]  # Probability levels for contour lines
-DZ_BOUNDARY = (0.45, 0.55)  # Dilemma zone defined as P ∈ [0.45, 0.55]
+DZ_SPEED_RANGE = (0, 25)
+DZ_DISTANCE_RANGE = (0, 60)
+DZ_GRID_RESOLUTION = 50
+DZ_CONTOUR_LEVELS = [0.3, 0.5, 0.7]
+DZ_BOUNDARY = (0.45, 0.55)
 
-# Vehicle type mapping for per-class DZ modeling
+# Vehicle type mapping
 VEHICLE_TYPES = {
     2: "car",
     3: "motorcycle",
@@ -112,11 +120,11 @@ VEHICLE_TYPES = {
     7: "truck"
 }
 
-# Explainability configuration
-SHAP_SAMPLE_SIZE = 100  # Number of samples for SHAP analysis
-SHAP_BACKGROUND_SIZE = 50  # Size of background dataset for SHAP
+# Explainability settings
+SHAP_SAMPLE_SIZE = 100
+SHAP_BACKGROUND_SIZE = 50
 
-# Visualization configuration
+# Visualization settings
 FIGURE_SIZE = (12, 8)
 DPI = 300
 PLOT_STYLE = "seaborn-v0_8"
@@ -127,12 +135,10 @@ SHAP_DIR = OUTPUT_DIR / "shap_analysis"
 DZ_DIR = OUTPUT_DIR / "dilemma_zones"
 MODEL_CHECKPOINT_DIR = MODEL_DIR / "checkpoints"
 
-# Create output subdirectories
 VISUALIZATION_DIR.mkdir(parents=True, exist_ok=True)
 SHAP_DIR.mkdir(parents=True, exist_ok=True)
 DZ_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Random seed for reproducibility
+# Random seed
 RANDOM_SEED = 42
-

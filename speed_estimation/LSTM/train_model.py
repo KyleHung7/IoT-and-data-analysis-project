@@ -409,56 +409,66 @@ def train(
         if has_multiple_sources and SPLIT_BY_SOURCE_FILE:
             # Split by source file to avoid data leakage between different recording sessions
             print("Splitting by source file to avoid data leakage...")
-        source_files = sorted(df['source_file'].unique())
-        split_idx = int(len(source_files) * TRAIN_VAL_SPLIT)
+            source_files = sorted(df['source_file'].unique())
+            split_idx = int(len(source_files) * TRAIN_VAL_SPLIT)
+            
+            train_sources = set(source_files[:split_idx])
+            val_sources = set(source_files[split_idx:])
+            
+            print(f"Training sources ({len(train_sources)}): {sorted(train_sources)}")
+            print(f"Validation sources ({len(val_sources)}): {sorted(val_sources)}")
+            
+            # Get vehicles from each source
+            train_vehicles = set(df[df['source_file'].isin(train_sources)]['tracker_id'].unique())
+            val_vehicles = set(df[df['source_file'].isin(val_sources)]['tracker_id'].unique())
+            
+            # Only use vehicles with valid labels
+            train_vehicles = train_vehicles & set(vehicles_with_labels)
+            val_vehicles = val_vehicles & set(vehicles_with_labels)
+            
+            # Split dataframes
+            train_df = df[df['tracker_id'].isin(train_vehicles)].copy()
+            val_df = df[df['tracker_id'].isin(val_vehicles)].copy()
         
-        train_sources = set(source_files[:split_idx])
-        val_sources = set(source_files[split_idx:])
-        
-        print(f"Training sources ({len(train_sources)}): {sorted(train_sources)}")
-        print(f"Validation sources ({len(val_sources)}): {sorted(val_sources)}")
-        
-        # Get vehicles from each source
-        train_vehicles = set(df[df['source_file'].isin(train_sources)]['tracker_id'].unique())
-        val_vehicles = set(df[df['source_file'].isin(val_sources)]['tracker_id'].unique())
-        
-        # Only use vehicles with valid labels
-        train_vehicles = train_vehicles & set(vehicles_with_labels)
-        val_vehicles = val_vehicles & set(vehicles_with_labels)
-        
-        # Split dataframes
-        train_df = df[df['tracker_id'].isin(train_vehicles)].copy()
-        val_df = df[df['tracker_id'].isin(val_vehicles)].copy()
-        
-    elif SPLIT_BY_DATE:
-        print("Splitting vehicles by date (frame_index)...")
-        # Get first frame for each vehicle to determine split
-        vehicle_first_frames = {}
-        for tracker_id in vehicles_with_labels:
-            vehicle_data = df[df['tracker_id'] == tracker_id]
-            vehicle_first_frames[tracker_id] = vehicle_data['frame_index'].min()
-        
-        # Sort vehicles by first frame
-        sorted_vehicles = sorted(vehicle_first_frames.items(), key=lambda x: x[1])
-        split_idx = int(len(sorted_vehicles) * TRAIN_VAL_SPLIT)
-        
-        train_vehicles = set([v[0] for v in sorted_vehicles[:split_idx]])
-        val_vehicles = set([v[0] for v in sorted_vehicles[split_idx:]])
-        
-        # Split dataframes
-        train_df = df[df['tracker_id'].isin(train_vehicles)].copy()
-        val_df = df[df['tracker_id'].isin(val_vehicles)].copy()
-    else:
-        # Random split (fallback)
-        print("Splitting vehicles randomly...")
-        from sklearn.model_selection import train_test_split
-        train_vehicles, val_vehicles = train_test_split(
-            list(vehicles_with_labels),
-            test_size=1 - TRAIN_VAL_SPLIT,
-            random_state=RANDOM_SEED
-        )
-        train_df = df[df['tracker_id'].isin(train_vehicles)].copy()
-        val_df = df[df['tracker_id'].isin(val_vehicles)].copy()
+        elif SPLIT_BY_DATE:
+            print("Splitting vehicles by date (frame_index)...")
+            # Get first frame for each vehicle to determine split
+            vehicle_first_frames = {}
+            for tracker_id in vehicles_with_labels:
+                vehicle_data = df[df['tracker_id'] == tracker_id]
+                vehicle_first_frames[tracker_id] = vehicle_data['frame_index'].min()
+            
+            # Sort vehicles by first frame
+            sorted_vehicles = sorted(vehicle_first_frames.items(), key=lambda x: x[1])
+            split_idx = int(len(sorted_vehicles) * TRAIN_VAL_SPLIT)
+            
+            train_vehicles = set([v[0] for v in sorted_vehicles[:split_idx]])
+            val_vehicles = set([v[0] for v in sorted_vehicles[split_idx:]])
+            
+            # Split dataframes
+            train_df = df[df['tracker_id'].isin(train_vehicles)].copy()
+            val_df = df[df['tracker_id'].isin(val_vehicles)].copy()
+        else:
+            # Random split (fallback)
+            print("Splitting vehicles randomly...")
+            from sklearn.model_selection import train_test_split
+            
+            # Ensure we have enough vehicles relative to split ratio
+            if len(vehicles_with_labels) < 2:
+                 # If only 1 vehicle, put it in train (validation will be empty/warn)
+                 train_vehicles = set(vehicles_with_labels)
+                 val_vehicles = set()
+            else:
+                train_vehicles_list, val_vehicles_list = train_test_split(
+                    list(vehicles_with_labels),
+                    test_size=1 - TRAIN_VAL_SPLIT,
+                    random_state=RANDOM_SEED
+                )
+                train_vehicles = set(train_vehicles_list)
+                val_vehicles = set(val_vehicles_list)
+                
+            train_df = df[df['tracker_id'].isin(train_vehicles)].copy()
+            val_df = df[df['tracker_id'].isin(val_vehicles)].copy()
     
     print(f"\nSplit Summary:")
     print(f"  Training vehicles: {len(train_vehicles)}, Training rows: {len(train_df)}")
@@ -603,7 +613,7 @@ def train(
     
     if resume_from and Path(resume_from).exists():
         print(f"Resuming from checkpoint: {resume_from}")
-        checkpoint = torch.load(resume_from, map_location=device)
+        checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
@@ -615,6 +625,7 @@ def train(
     train_losses = []
     val_losses = []
     patience_counter = 0
+    val_loss = float('inf')
     
     # Initialize metadata (will be updated each epoch)
     # Note: train_stats and val_stats are already computed above
