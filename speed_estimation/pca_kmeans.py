@@ -10,13 +10,17 @@ from sklearn.cluster import KMeans
 from sklearn.impute import SimpleImputer
 import os
 
-# 設定學術風格繪圖參數
-sns.set(style="ticks", context="paper", font_scale=1.2)
-plt.rcParams['font.family'] = 'sans-serif'
+# ==========================================
+#  1. Style & Font Settings (Fixed)
+# ==========================================
+# Use a robust font list to avoid "font not found" errors
+# Priority: Arial -> DejaVu Sans (default safe) -> Generic sans-serif
+sns.set(style="whitegrid", context="paper", font_scale=1.3)
+plt.rcParams['font.family'] = ['Arial', 'DejaVu Sans', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 
-# --- 1. 資料載入與前處理 ---
-print("Initializing Advanced Analysis...")
+# --- Data Loading ---
+print("Initializing Analysis...")
 file_log = 'speed_log.csv'
 file_sensor = 'merged_sensor_data.csv'
 
@@ -27,26 +31,23 @@ if not os.path.exists(file_log) or not os.path.exists(file_sensor):
 df_cam = pd.read_csv(file_log)
 df_ameba = pd.read_csv(file_sensor)
 
-# 清理欄位
+# Clean columns
 df_cam.columns = df_cam.columns.str.strip()
 df_ameba.columns = df_ameba.columns.str.strip()
 
-# ==================================================
-# 【關鍵修改】在這裡設定你在圖表上想要顯示的專業名稱
-# ==================================================
-df_cam['Device'] = 'Intersection Camera'  # 原 speed_log
-df_ameba['Device'] = 'Ameba 82 mini'      # 原 Sensor_Data
-# ==================================================
+# Set Device Names (English)
+df_cam['Device'] = 'Intersection Camera'
+df_ameba['Device'] = 'Ameba 82 mini'
 
 df_all = pd.concat([df_cam, df_ameba], axis=0, ignore_index=True)
 
-# 定義關鍵物理特徵 (除去座標 x, y，專注於動力學特徵)
+# Define Features
 numeric_features = ['speed_kmh', 'distance_to_stop_line', 'ttc', 'traffic_density']
 categorical_features = ['vehicle_type', 'traffic_light_status']
 
-# Pipeline 建置
+# Pipeline
 numeric_transformer = Pipeline(steps=[
-    ('imputer', SimpleImputer(strategy='mean')), # 改用 mean 填補，減少 0 的偏差
+    ('imputer', SimpleImputer(strategy='mean')),
     ('scaler', StandardScaler())
 ])
 categorical_transformer = Pipeline(steps=[
@@ -60,18 +61,14 @@ preprocessor = ColumnTransformer(
         ('cat', categorical_transformer, categorical_features)
     ])
 
-# --- 2. 降維與分群 (PCA + K-means) ---
-print("Executing PCA & Clustering algorithms...")
+# --- PCA & Clustering ---
+print("Executing PCA & Clustering...")
 X_processed = preprocessor.fit_transform(df_all)
 
-# PCA (保留解釋力)
 pca = PCA(n_components=2)
 X_pca = pca.fit_transform(X_processed)
-
-# 取得 PCA components (特徵向量)，用於後續解釋
 pca_components = pca.components_[:, :len(numeric_features)]
 
-# K-means (設 k=3: 預期分為 靜止等待、減速接近、全速通過)
 kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
 clusters = kmeans.fit_predict(X_processed)
 
@@ -79,67 +76,126 @@ df_all['PCA_1'] = X_pca[:, 0]
 df_all['PCA_2'] = X_pca[:, 1]
 df_all['Cluster'] = clusters
 
-# =========================================
-#  圖表 1: 雙視角比較圖 (修正標籤版)
-# =========================================
+
+# ==============================================================================
+#  Prepare PCA Loadings Data
+# ==============================================================================
+try:
+    feature_names_raw = preprocessor.get_feature_names_out()
+except AttributeError:
+    feature_names_raw = numeric_features + list(preprocessor.named_transformers_['cat']['onehot'].get_feature_names_out(categorical_features))
+
+# Clean feature names for better display
+clean_feature_names = [f.replace('num__', '').replace('cat__', '').replace('traffic_light_status', 'Light').replace('vehicle_type', 'Type') for f in feature_names_raw]
+
+pca_loadings_df = pd.DataFrame(
+    pca.components_.T, 
+    index=clean_feature_names,
+    columns=['PC1 (Kinematics)', 'PC2 (Context)']
+)
+
+# ==============================================================================
+#  Chart 1: Professional Diverging Bar Chart (PCA Loadings) - ENGLISH
+# ==============================================================================
+print("Generating professional PCA loadings bar chart...")
+
+def plot_loadings_bar(ax, pc_series, title, subtitle_pos, subtitle_neg):
+    # Sort by absolute value
+    sorted_series = pc_series.abs().sort_values(ascending=True)
+    original_values = pc_series[sorted_series.index]
+    
+    # Colors: Blue for Positive, Red for Negative
+    colors = ['#0984e3' if x > 0 else '#d63031' for x in original_values]
+    
+    # Draw bars
+    bars = ax.barh(original_values.index, original_values.values, color=colors, alpha=0.8, edgecolor='none')
+    
+    # Add center line
+    ax.axvline(0, color='black', linewidth=0.8, linestyle='-')
+    
+    # Add value labels
+    for bar, value in zip(bars, original_values.values):
+        width = bar.get_width()
+        label_x_pos = width if width > 0 else width - 0.02
+        ha_align = 'left' if width > 0 else 'right'
+        ax.text(label_x_pos, bar.get_y() + bar.get_height()/2, f'{value:+.3f}', 
+                va='center', ha=ha_align, fontsize=10, fontweight='bold', color='#2d3436')
+
+    # Titles and Annotations (ALL ENGLISH)
+    ax.set_title(title, fontsize=14, weight='bold', pad=20)
+    ax.text(0.02, 1.02, subtitle_neg, transform=ax.transAxes, color='#d63031', fontsize=10, ha='left', fontweight='bold')
+    ax.text(0.98, 1.02, subtitle_pos, transform=ax.transAxes, color='#0984e3', fontsize=10, ha='right', fontweight='bold')
+    
+    ax.set_xlabel('Feature Weight (Contribution)', fontsize=11, labelpad=10)
+    ax.grid(axis='x', linestyle='--', alpha=0.5)
+    sns.despine(left=True, bottom=False, right=True, top=True)
+
+# Create figure
+fig_bars, axes_bars = plt.subplots(2, 1, figsize=(10, 14))
+
+# Plot PC1
+plot_loadings_bar(
+    axes_bars[0], 
+    pca_loadings_df['PC1 (Kinematics)'], 
+    title='(a) PC1 Top Influencers (Kinematics)',
+    subtitle_pos='Positive (+): Moves point RIGHT',
+    subtitle_neg='Negative (-): Moves point LEFT'
+)
+
+# Plot PC2
+plot_loadings_bar(
+    axes_bars[1], 
+    pca_loadings_df['PC2 (Context)'], 
+    title='(b) PC2 Top Influencers (Context)',
+    subtitle_pos='Positive (+): Moves point UP',
+    subtitle_neg='Negative (-): Moves point DOWN'
+)
+
+plt.tight_layout()
+plt.subplots_adjust(hspace=0.4)
+plt.savefig('pca_loadings_bars_english.png', dpi=300, bbox_inches='tight')
+print("✅ Generated: pca_loadings_bars_english.png")
+
+
+# ==============================================================================
+#  Chart 2: Scatter Plots (Cluster & Device) - ENGLISH
+# ==============================================================================
+# Reset style for scatter plots
+sns.set(style="ticks", context="paper", font_scale=1.2)
+plt.rcParams['font.family'] = ['Arial', 'DejaVu Sans', 'sans-serif']
+
 fig, axes = plt.subplots(1, 2, figsize=(15, 6))
 fig.suptitle('Comparative Analysis of Latent Space Distributions', fontsize=16, weight='bold')
 
-# Subplot 1: Semantic Clustering
-scatter1 = sns.scatterplot(
+# Scatter 1
+sns.scatterplot(
     data=df_all, x='PCA_1', y='PCA_2', hue='Cluster',
     palette='viridis', s=80, alpha=0.8, ax=axes[0], edgecolor='k'
 )
 axes[0].set_title('Behavioral Clustering (K-means)', weight='bold')
 axes[0].set_xlabel('Principal Component 1 (Kinematics)')
 axes[0].set_ylabel('Principal Component 2 (Context)')
+axes[0].legend(title='Cluster ID')
 
-# Subplot 2: Device Source
-# 這裡 hue='Device' 會使用我們前面設定好的新名稱
-# 使用高對比顏色：Intersection Camera (灰/黑) vs Ameba (亮色) 以突顯差異
+# Scatter 2
 custom_palette = {'Intersection Camera': '#636e72', 'Ameba 82 mini': '#0984e3'}
-scatter2 = sns.scatterplot(
+sns.scatterplot(
     data=df_all, x='PCA_1', y='PCA_2', hue='Device',
     palette=custom_palette, s=80, alpha=0.7, ax=axes[1], edgecolor='None'
 )
 axes[1].set_title('Device Coverage Comparison', weight='bold')
 axes[1].set_xlabel('Principal Component 1')
 axes[1].set_ylabel('Principal Component 2')
+axes[1].legend(title='Data Source')
 
 plt.tight_layout()
-plt.savefig('advanced_comparison_plot.png', dpi=300, bbox_inches='tight')
-print("✅ Generated: advanced_comparison_plot.png")
+plt.savefig('advanced_comparison_plot_english.png', dpi=300, bbox_inches='tight')
+print("✅ Generated: advanced_comparison_plot_english.png")
 
 
-# =========================================
-#  圖表 2: PCA 特徵向量圖 (Feature Loadings)
-# =========================================
-plt.figure(figsize=(8, 6))
-plt.title('PCA Feature Loadings (Eigenvectors)', fontsize=14, weight='bold')
-plt.axvline(0, color='grey', linestyle='--')
-plt.axhline(0, color='grey', linestyle='--')
-plt.xlim(-1, 1)
-plt.ylim(-1, 1)
-plt.xlabel('PC1 Loading (Contribution)')
-plt.ylabel('PC2 Loading (Contribution)')
-
-# 畫箭頭
-for i, feature in enumerate(numeric_features):
-    plt.arrow(0, 0, pca_components[0, i], pca_components[1, i],
-              color='r', alpha=0.8, head_width=0.03)
-    plt.text(pca_components[0, i]*1.15, pca_components[1, i]*1.15,
-             feature, color='darkred', ha='center', va='center', fontsize=11, weight='bold')
-
-plt.grid(True, linestyle=':', alpha=0.6)
-plt.tight_layout()
-plt.savefig('pca_loadings_analysis.png', dpi=300)
-print("✅ Generated: pca_loadings_analysis.png")
-
-
-# =========================================
-#  圖表 3: 專業總結表 (修正: 移除來源佔比)
-# =========================================
-# 計算統計量
+# ==============================================================================
+#  Chart 3: Summary Table - ENGLISH
+# ==============================================================================
 summary = df_all.groupby('Cluster').agg({
     'speed_kmh': ['mean', 'std'],
     'distance_to_stop_line': ['mean', 'std'],
@@ -147,56 +203,44 @@ summary = df_all.groupby('Cluster').agg({
     'traffic_density': 'mean'
 }).round(2)
 
-# 扁平化欄位名稱
 summary.columns = [
     'Speed Avg (km/h)', 'Speed Std',
     'Dist. Avg (m)', 'Dist. Std',
     'TTC Avg (s)', 'Density Avg'
 ]
 
-# 加入 Count
 summary['Count'] = df_all['Cluster'].value_counts().sort_index()
-
-# 調整欄位順序
 cols = ['Count', 'Speed Avg (km/h)', 'Speed Std', 'Dist. Avg (m)', 'TTC Avg (s)', 'Density Avg']
 summary = summary[cols]
 summary.index = [f'Cluster {i}' for i in summary.index]
 
-# 繪圖
 fig, ax = plt.subplots(figsize=(10, 3.5))
 ax.axis('tight')
 ax.axis('off')
 
-# 表格內容
-table_data = summary.values
-col_labels = summary.columns
-row_labels = summary.index
-
-table = ax.table(cellText=table_data, colLabels=col_labels, rowLabels=row_labels,
+table = ax.table(cellText=summary.values, colLabels=summary.columns, rowLabels=summary.index,
                  cellLoc='center', loc='center')
 
 table.auto_set_font_size(False)
 table.set_fontsize(11)
 table.scale(1.2, 2.0)
 
-# 專業配色與格式化
 for (row, col), cell in table.get_celld().items():
     cell.set_edgecolor('white')
     if row == 0:
-        cell.set_facecolor('#2d3436') # 深鐵灰 Header
+        cell.set_facecolor('#2d3436')
         cell.set_text_props(weight='bold', color='white')
         cell.set_height(0.18)
     elif col == -1:
-        cell.set_facecolor('#dfe6e9') # Index 淺灰
+        cell.set_facecolor('#dfe6e9')
         cell.set_text_props(weight='bold')
     else:
         cell.set_facecolor('#f5f6fa')
-        # 重點強調：如果速度標準差很大，標示出來 (代表該群行為不穩定)
         if col == 2 and summary.values[row-1][2] > 10:
-            cell.set_text_props(color='#d63031', weight='bold') # 警示紅
+            cell.set_text_props(color='#d63031', weight='bold')
 
 plt.title('Cluster Physical Characteristics Profile', fontsize=14, weight='bold', y=1.05)
-plt.savefig('professional_summary_table.png', dpi=300, bbox_inches='tight')
-print("✅ Generated: professional_summary_table.png")
+plt.savefig('professional_summary_table_english.png', dpi=300, bbox_inches='tight')
+print("✅ Generated: professional_summary_table_english.png")
 
-print("\n分析完成。")
+print("\nAnalysis Completed Successfully.")
