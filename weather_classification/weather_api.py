@@ -1,7 +1,7 @@
 import requests
 
-import requests
-from typing import Optional, Dict, Any
+from datetime import datetime
+from typing import Optional, Literal
 
 
 def _parse_precip(raw: Optional[str]) -> Optional[float]:
@@ -98,27 +98,30 @@ def get_rainfall(api_key: str, station_id: Optional[str]) -> Optional[float]:
     return result
 
 
-def classify_sun_or_rain(weather_text: str | None, precipitation: float | None) -> str | None:
+def classify_clear_or_not(weather_text: str | None, precipitation: float | None) -> Literal["clear", "rain", "not_clear"] | None:
     """
-    依據 CWA API 回傳的 weather 文字描述與 precipitation 數值，判定天氣狀況為 clear, rain, snow, fog。
+    依據 CWA API 回傳的 weather 文字描述與 precipitation 數值，判定天氣狀況為 clear, night, not_clear。
     """
     if weather_text is None:
-        return None
+        if precipitation is None:
+            return None
+        if precipitation > 0:
+            return "not_clear"
+        return "clear"
+    
     weather_text = weather_text or ""
-    if "雪" in weather_text or "冰" in weather_text or "雹" in weather_text:
-        return "snow"
-    if "雨" in weather_text or "雷" in weather_text or "電" in weather_text:
-        return "rain"
-    if "霧" in weather_text or "霾" in weather_text or "靄" in weather_text:
-        return "fog"
+    if "雪" in weather_text or "冰" in weather_text or "雹" in weather_text or \
+        "雨" in weather_text or "雷" in weather_text or "電" in weather_text or \
+        "霧" in weather_text or "霾" in weather_text or "靄" in weather_text:
+        return "not_clear"
 
     try:
-        precip = float(precipitation) if precipitation is not None else 0.0
+        precipitation = float(precipitation) if precipitation is not None else 0.0
     except ValueError:
-        precip = 0.0
+        precipitation = 0.0
 
-    if precip > 0:
-        return "rain"
+    if precipitation > 0:
+        return "not_clear"
 
     return "clear"
 
@@ -207,14 +210,24 @@ def get_weather_condition_api(lat: float, lon: float, api_key: str) -> tuple[Opt
     station_id = station.get("StationId")
 
     obs_time = (station.get("ObsTime") or {}).get("DateTime")
+    obs_time = datetime.fromisoformat(obs_time) if obs_time else None
     geo = station.get("GeoInfo") or {}
     weather_element = station.get("WeatherElement") or {}
     now = weather_element.get("Now") or {}
 
     weather_text: str | None = weather_element.get("Weather")
+    if weather_text == "-99":
+        weather_text = None
     precipitation = get_rainfall(API_KEY, station_id)
+    if precipitation == "-99" or precipitation == "X":
+        precipitation = None
+    elif precipitation == "-98" or precipitation == "T":
+        precipitation = 0.0
 
-    condition = classify_sun_or_rain(weather_text, precipitation)  # clear, rain, snow, fog
+    condition = classify_clear_or_not(weather_text, precipitation)  # clear, not_clear
+    
+    if obs_time is not None and condition == "clear" and (obs_time.hour >= 18 or obs_time.hour < 6):
+        condition = "night"
 
     info = {
         "observed_at": obs_time,
